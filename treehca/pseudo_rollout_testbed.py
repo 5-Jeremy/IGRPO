@@ -17,7 +17,7 @@ from typing import Any, Callable, Sequence
 import numpy as np
 
 from treehca.product_page_parser import ProductPageContextParts, extract_product_page_contexts, parse_product_page_fields
-from treehca.pseudo_rollout import ProductPagePseudoRollout, ProductPagePseudoRolloutScores, prepare_product_page_pseudo_rollouts, required_max_logprobs, score_product_page_pseudo_rollouts
+from treehca.pseudo_rollout import ActionChoiceScore, ProductPagePseudoRollout, ProductPagePseudoRolloutScores, prepare_product_page_pseudo_rollouts, required_max_logprobs, score_product_page_pseudo_rollouts
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,23 @@ class RenderedProductPage:
 
 
 @dataclass(frozen=True)
+class SampledAgentResponse:
+    """One decoded real-prompt completion and its exact generated token IDs."""
+
+    text: str
+    token_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class ThinkingPrefix:
+    """The complete thinking prefix retained for a conditioned pseudo probe."""
+
+    token_ids: tuple[int, ...]
+    text: str
+    status: str
+
+
+@dataclass(frozen=True)
 class EmpiricalActionSamples:
     """Projected Monte Carlo completions for one product page."""
 
@@ -51,6 +68,8 @@ class EmpiricalActionSamples:
     invalid_format_completions: int
     inadmissible_completions: int
     invalid_examples: tuple[dict[str, str], ...]
+    projected_actions: tuple[str, ...] = ()
+    format_valids: tuple[int, ...] = ()
 
 
 def _validate_positive_integer(value: int, name: str) -> None:
@@ -223,7 +242,7 @@ def sample_real_prompt_completions(
     temperature: float,
     seed: int,
     page_batch_size: int,
-) -> tuple[tuple[str, ...], ...]:
+) -> tuple[tuple[SampledAgentResponse, ...], ...]:
     """Sample full agent responses, sharing each prompt prefill across ``n`` outputs."""
     _validate_positive_integer(samples_per_page, "samples_per_page")
     _validate_positive_integer(max_new_tokens, "max_new_tokens")
@@ -235,7 +254,7 @@ def sample_real_prompt_completions(
     except ImportError as error:
         raise RuntimeError("vLLM is required to sample real product-page prompts") from error
 
-    all_completions: list[tuple[str, ...]] = []
+    all_completions: list[tuple[SampledAgentResponse, ...]] = []
     for batch_start in range(0, len(prompt_token_ids), page_batch_size):
         batch = prompt_token_ids[batch_start : batch_start + page_batch_size]
         params = [
@@ -266,13 +285,85 @@ def sample_real_prompt_completions(
             if not isinstance(candidates, list) or len(candidates) != samples_per_page:
                 actual = len(candidates) if isinstance(candidates, list) else None
                 raise ValueError(f"Expected {samples_per_page} completions for a real prompt, got {actual}")
-            decoded = tokenizer.batch_decode([candidate.token_ids for candidate in candidates], skip_special_tokens=True)
-            all_completions.append(tuple(decoded))
+            candidate_token_ids = [tuple(int(token_id) for token_id in candidate.token_ids) for candidate in candidates]
+            decoded = tokenizer.batch_decode(candidate_token_ids, skip_special_tokens=True)
+            all_completions.append(tuple(SampledAgentResponse(text=text, token_ids=token_ids) for text, token_ids in zip(decoded, candidate_token_ids)))
     return tuple(all_completions)
 
 
+def extract_thinking_prefix(completion: SampledAgentResponse, tokenizer: Any) -> ThinkingPrefix:
+    """Return exact sampled tokens through the first complete ``</think>`` tag.
+
+    A malformed response gets an empty prefix so every Monte Carlo sample can
+    still be scored without conditioning on a partial thought or its action.
+    """
+    think_start = completion.text.find("<think>")
+    think_end = completion.text.find("</think>", think_start + len("<think>")) if think_start >= 0 else -1
+    if think_start < 0 or think_end < 0:
+        return ThinkingPrefix(token_ids=(), text="", status="no_complete_thinking_block")
+
+    # Locate the first sampled-token prefix whose decoded text contains the
+    # complete closing tag. Binary search keeps this inexpensive for long CoTs.
+    low = 1
+    high = len(completion.token_ids)
+    while low < high:
+        middle = (low + high) // 2
+        decoded = tokenizer.decode(completion.token_ids[:middle], skip_special_tokens=True)
+        if "</think>" in decoded:
+            high = middle
+        else:
+            low = middle + 1
+    prefix_ids = completion.token_ids[:low]
+    prefix_text = tokenizer.decode(prefix_ids, skip_special_tokens=True)
+    if "</think>" not in prefix_text:
+        raise ValueError("Decoded completion contains </think>, but no generated-token prefix reproduces it")
+    return ThinkingPrefix(token_ids=prefix_ids, text=prefix_text, status="complete_thinking_block")
+
+
+def score_thinking_conditioned_pseudo_rollouts(
+    inference_engine: Any,
+    tokenizer: Any,
+    pseudo_rollouts: Sequence[ProductPagePseudoRollout],
+    completion_batches: Sequence[Sequence[SampledAgentResponse]],
+    *,
+    max_model_len: int,
+    batch_size: int,
+) -> tuple[tuple[tuple[ProductPagePseudoRolloutScores, ...], ...], tuple[tuple[ThinkingPrefix, ...], ...]]:
+    """Score every real completion's pseudo prompt after its sampled thinking."""
+    _validate_positive_integer(batch_size, "pseudo_score_batch_size")
+    if len(pseudo_rollouts) != len(completion_batches):
+        raise ValueError("Pseudo-rollout pages and completion batches must align")
+
+    page_prefixes = tuple(tuple(extract_thinking_prefix(completion, tokenizer) for completion in completions) for completions in completion_batches)
+    flat_rollouts = [pseudo for pseudo, completions in zip(pseudo_rollouts, completion_batches) for _ in completions]
+    flat_prefixes = [prefix.token_ids for prefixes in page_prefixes for prefix in prefixes]
+    flat_scores: list[ProductPagePseudoRolloutScores] = []
+    for start in range(0, len(flat_rollouts), batch_size):
+        batch_rollouts = flat_rollouts[start : start + batch_size]
+        batch_prefixes = flat_prefixes[start : start + batch_size]
+        batch_scores = score_product_page_pseudo_rollouts(
+            inference_engine,
+            batch_rollouts,
+            max_model_len=max_model_len,
+            assistant_response_prefix_token_ids=batch_prefixes,
+        )
+        if any(score is None for score in batch_scores):
+            raise RuntimeError("A thinking-conditioned pseudo-rollout exceeded the validated model context limit")
+        flat_scores.extend(score for score in batch_scores if score is not None)
+
+    page_scores = []
+    offset = 0
+    for completions in completion_batches:
+        next_offset = offset + len(completions)
+        page_scores.append(tuple(flat_scores[offset:next_offset]))
+        offset = next_offset
+    if offset != len(flat_scores):
+        raise RuntimeError("Thinking-conditioned pseudo-rollout scores lost page alignment")
+    return tuple(page_scores), page_prefixes
+
+
 def project_completions(
-    completions: Sequence[str],
+    completions: Sequence[str | SampledAgentResponse],
     admissible_actions: Sequence[str],
     *,
     projection: Callable[[list[str]], tuple[list[str], list[int]]] | None = None,
@@ -283,7 +374,8 @@ def project_completions(
         from agent_system.environments.env_package.webshop.projection import webshop_projection
 
         projection = webshop_projection
-    projected, format_valids = projection(list(completions))
+    completion_texts = [completion.text if isinstance(completion, SampledAgentResponse) else completion for completion in completions]
+    projected, format_valids = projection(completion_texts.copy())
     if len(projected) != len(completions) or len(format_valids) != len(completions):
         raise ValueError("WebShop projection returned a misaligned result")
 
@@ -294,7 +386,7 @@ def project_completions(
     invalid_format = 0
     inadmissible = 0
     invalid_examples = []
-    for response, action, format_valid in zip(completions, projected, format_valids):
+    for response, action, format_valid in zip(completion_texts, projected, format_valids):
         action_index = action_to_index.get(action.lower())
         if action_index is not None:
             counts[action_index] += 1
@@ -316,6 +408,8 @@ def project_completions(
         invalid_format_completions=invalid_format,
         inadmissible_completions=inadmissible,
         invalid_examples=tuple(invalid_examples),
+        projected_actions=tuple(projected),
+        format_valids=tuple(int(value) for value in format_valids),
     )
 
 
@@ -345,7 +439,8 @@ def compare_action_distributions(
     *,
     bootstrap_replicates: int,
     seed: int,
-) -> dict[str, float | int | None]:
+    per_sample_expected_probabilities: Sequence[Sequence[float]] | None = None,
+) -> dict[str, float | int | str | None]:
     """Compare one conditional empirical distribution to the pseudo distribution."""
     _validate_positive_integer(bootstrap_replicates, "bootstrap_replicates")
     expected = np.asarray(expected_probabilities, dtype=np.float64)
@@ -365,11 +460,36 @@ def compare_action_distributions(
             "multinomial_g_statistic": None,
             "parametric_bootstrap_p_value": None,
             "bootstrap_replicates": bootstrap_replicates,
+            "bootstrap_null": "multinomial" if per_sample_expected_probabilities is None else "poisson_multinomial_from_conditioned_rows",
         }
+
+    probability_rows = None
+    if per_sample_expected_probabilities is not None:
+        probability_rows = np.asarray(per_sample_expected_probabilities, dtype=np.float64)
+        if probability_rows.shape != (total, len(expected)):
+            raise ValueError(f"Per-sample expected probabilities must have shape {(total, len(expected))}, got {probability_rows.shape}")
+        if np.any(probability_rows < 0.0) or not np.all(np.isfinite(probability_rows)) or not np.allclose(probability_rows.sum(axis=1), 1.0, rtol=1e-8, atol=1e-10):
+            raise ValueError("Every per-sample expected-probability row must be finite, nonnegative, and sum to one")
+        row_mean = probability_rows.mean(axis=0)
+        if not np.allclose(row_mean, expected, rtol=1e-8, atol=1e-10):
+            raise ValueError("Expected probabilities must equal the mean of the per-sample rows")
 
     empirical = counts / total
     statistic = _likelihood_ratio_statistic(counts, expected)
-    simulated_counts = np.random.default_rng(seed).multinomial(total, expected, size=bootstrap_replicates)
+    rng = np.random.default_rng(seed)
+    if probability_rows is None:
+        simulated_counts = rng.multinomial(total, expected, size=bootstrap_replicates)
+        bootstrap_null = "multinomial"
+    else:
+        # Independent non-identical categorical draws form a Poisson multinomial
+        # null; using multinomial(total, mean_probability) would overstate its
+        # variance when the thought-conditioned distributions differ.
+        simulated_counts = np.zeros((bootstrap_replicates, len(expected)), dtype=np.int64)
+        replicate_indices = np.arange(bootstrap_replicates)
+        for probability_row in probability_rows:
+            sampled_actions = rng.choice(len(expected), size=bootstrap_replicates, p=probability_row)
+            np.add.at(simulated_counts, (replicate_indices, sampled_actions), 1)
+        bootstrap_null = "poisson_multinomial_from_conditioned_rows"
     expected_counts = total * expected
     ratios = np.ones_like(simulated_counts, dtype=np.float64)
     np.divide(simulated_counts, expected_counts, out=ratios, where=simulated_counts > 0)
@@ -385,7 +505,69 @@ def compare_action_distributions(
         "multinomial_g_statistic": statistic if math.isfinite(statistic) else None,
         "parametric_bootstrap_p_value": p_value,
         "bootstrap_replicates": bootstrap_replicates,
+        "bootstrap_null": bootstrap_null,
     }
+
+
+def average_pseudo_rollout_scores(scores: Sequence[ProductPagePseudoRolloutScores]) -> ProductPagePseudoRolloutScores:
+    """Average aligned conditional distributions into one marginal distribution."""
+    scores = tuple(scores)
+    if not scores:
+        raise ValueError("Cannot average an empty collection of pseudo-rollout scores")
+    reference = scores[0].choices
+    for row, score in enumerate(scores[1:], start=1):
+        if [(choice.label, choice.action) for choice in score.choices] != [(choice.label, choice.action) for choice in reference]:
+            raise ValueError(f"Pseudo-rollout score row {row} does not align with the first row")
+    probabilities = np.mean([[choice.probability for choice in score.choices] for score in scores], axis=0)
+    choices = tuple(
+        ActionChoiceScore(
+            label=reference_choice.label,
+            action=reference_choice.action,
+            probability=float(probability),
+            log_probability=math.log(float(probability)) if probability > 0.0 else -math.inf,
+            # Variant-level logits are conditional on individual thoughts and
+            # have no single aggregate equivalent.
+            bare_log_probability=-math.inf,
+            spaced_log_probability=-math.inf,
+        )
+        for reference_choice, probability in zip(reference, probabilities)
+    )
+    return ProductPagePseudoRolloutScores(choices=choices)
+
+
+def build_conditioned_rollout_records(
+    pseudo_rollout: ProductPagePseudoRollout,
+    scores: Sequence[ProductPagePseudoRolloutScores],
+    thinking_prefixes: Sequence[ThinkingPrefix],
+    empirical: EmpiricalActionSamples,
+) -> list[dict[str, Any]]:
+    """Serialize per-completion conditional probabilities without bulky CoT text."""
+    if not len(scores) == len(thinking_prefixes) == empirical.total_completions:
+        raise ValueError("Conditioned scores, thinking prefixes, and empirical completions must align")
+    if len(empirical.projected_actions) != empirical.total_completions or len(empirical.format_valids) != empirical.total_completions:
+        raise ValueError("Empirical per-completion projection details are missing")
+    action_to_label = {action.lower(): label for label, action in zip(pseudo_rollout.labels, pseudo_rollout.actions)}
+    records = []
+    breakpoint()
+    for sample_index, (score, thinking, projected_action, format_valid) in enumerate(zip(scores, thinking_prefixes, empirical.projected_actions, empirical.format_valids)):
+        projected_label = action_to_label.get(projected_action.lower())
+        maximum_probability = max(choice.probability for choice in score.choices)
+        top_labels = [choice.label for choice in score.choices if math.isclose(choice.probability, maximum_probability, rel_tol=0.0, abs_tol=max(1e-12, maximum_probability * 1e-12))]
+        records.append(
+            {
+                "sample_index": sample_index,
+                "thinking_status": thinking.status,
+                "thinking_prefix_tokens": len(thinking.token_ids),
+                "projected_action": projected_action,
+                "projected_label": projected_label,
+                "format_valid": bool(format_valid),
+                "pseudo_entropy_nats": score.entropy,
+                "label_probabilities": score.label_probabilities,
+                "projected_action_probability": score.label_probabilities[projected_label] if projected_label is not None else None,
+                "projected_action_is_pseudo_argmax": projected_label in top_labels if projected_label is not None else None,
+            }
+        )
+    return records
 
 
 def _wilson_interval(successes: int, total: int) -> tuple[float | None, float | None]:
@@ -408,12 +590,26 @@ def build_page_result(
     real_prompt_tokens: int,
     bootstrap_replicates: int,
     seed: int,
+    pseudo_probability_mode: str = "single_no_thinking",
+    all_sample_scores: ProductPagePseudoRolloutScores | None = None,
+    conditioned_rollouts: Sequence[dict[str, Any]] | None = None,
+    conditioned_comparison_scores: Sequence[ProductPagePseudoRolloutScores] | None = None,
 ) -> dict[str, Any]:
     """Build the serializable comparison for one aligned page."""
     probabilities = [choice.probability for choice in scores.choices]
-    comparison = compare_action_distributions(probabilities, empirical.action_counts, bootstrap_replicates=bootstrap_replicates, seed=seed)
+    per_sample_expected = None
+    if conditioned_comparison_scores is not None:
+        per_sample_expected = [[choice.probability for choice in sample_score.choices] for sample_score in conditioned_comparison_scores]
+    comparison = compare_action_distributions(
+        probabilities,
+        empirical.action_counts,
+        bootstrap_replicates=bootstrap_replicates,
+        seed=seed,
+        per_sample_expected_probabilities=per_sample_expected,
+    )
     conditional_total = empirical.recognized_completions
     action_rows = []
+    all_sample_probabilities = None if all_sample_scores is None else all_sample_scores.label_probabilities
     for choice, count in zip(scores.choices, empirical.action_counts):
         lower, upper = _wilson_interval(count, conditional_total)
         action_rows.append(
@@ -421,13 +617,14 @@ def build_page_result(
                 "label": choice.label,
                 "action": choice.action,
                 "pseudo_probability": choice.probability,
+                **({"pseudo_probability_all_samples": all_sample_probabilities[choice.label]} if all_sample_probabilities is not None else {}),
                 "empirical_count": count,
                 "empirical_probability_conditional": count / conditional_total if conditional_total else None,
                 "empirical_wilson_95_interval": [lower, upper],
             }
         )
     total = empirical.total_completions
-    return {
+    result = {
         "asin": page.asin,
         "category": page.category,
         "shopping_task": page.shopping_task,
@@ -435,6 +632,7 @@ def build_page_result(
         "real_prompt_tokens": real_prompt_tokens,
         "pseudo_prompt_tokens": len(pseudo_rollout.prompt_token_ids),
         "pseudo_entropy_nats": scores.entropy,
+        "pseudo_probability_mode": pseudo_probability_mode,
         "monte_carlo": {
             "total_completions": total,
             "format_valid_completions": empirical.format_valid_completions,
@@ -449,6 +647,14 @@ def build_page_result(
         "comparison_conditional_on_recognized_action": comparison,
         "actions": action_rows,
     }
+    if conditioned_rollouts is not None:
+        result["conditioned_pseudo_rollouts"] = list(conditioned_rollouts)
+        result["mean_conditioned_pseudo_entropy_nats"] = float(np.mean([row["pseudo_entropy_nats"] for row in conditioned_rollouts]))
+        result["complete_thinking_fraction"] = sum(row["thinking_status"] == "complete_thinking_block" for row in conditioned_rollouts) / len(conditioned_rollouts) if conditioned_rollouts else None
+        recognized_records = [row for row in conditioned_rollouts if row["projected_label"] is not None]
+        result["conditioned_top_action_agreement"] = sum(row["projected_action_is_pseudo_argmax"] for row in recognized_records) / len(recognized_records) if recognized_records else None
+        result["mean_probability_assigned_to_projected_action"] = float(np.mean([row["projected_action_probability"] for row in recognized_records])) if recognized_records else None
+    return result
 
 
 def _benjamini_hochberg_rejections(p_values: Sequence[float], alpha: float) -> int:
@@ -471,7 +677,7 @@ def summarize_page_results(page_results: Sequence[dict[str, Any]], requested_pag
     tv_values = [comparison["total_variation_distance"] for comparison in tested]
     js_values = [comparison["jensen_shannon_divergence_nats"] for comparison in tested]
     action_counts = [page["action_count"] for page in page_results]
-    return {
+    summary = {
         "pages_requested": requested_pages,
         "pages_evaluated": len(page_results),
         "distinct_action_counts": sorted(set(action_counts)),
@@ -487,6 +693,14 @@ def summarize_page_results(page_results: Sequence[dict[str, Any]], requested_pag
         "goodness_of_fit_rejections_at_0_05_uncorrected": sum(p_value < 0.05 for p_value in p_values),
         "goodness_of_fit_rejections_at_0_05_bh_fdr": _benjamini_hochberg_rejections(p_values, 0.05) if p_values else 0,
     }
+    conditioned_records = [record for page in page_results for record in page.get("conditioned_pseudo_rollouts", [])]
+    if conditioned_records:
+        summary["conditioned_pseudo_probes"] = len(conditioned_records)
+        summary["complete_thinking_fraction"] = sum(record["thinking_status"] == "complete_thinking_block" for record in conditioned_records) / len(conditioned_records)
+        recognized_records = [record for record in conditioned_records if record["projected_label"] is not None]
+        summary["conditioned_top_action_agreement"] = sum(record["projected_action_is_pseudo_argmax"] for record in recognized_records) / len(recognized_records) if recognized_records else None
+        summary["mean_probability_assigned_to_projected_action"] = float(np.mean([record["projected_action_probability"] for record in recognized_records])) if recognized_records else None
+    return summary
 
 
 def format_markdown_summary(report: dict[str, Any]) -> str:
@@ -504,6 +718,7 @@ def format_markdown_summary(report: dict[str, Any]) -> str:
         f"Seed: `{config['seed']}`  ",
         f"Pages: `{summary['pages_evaluated']}` of `{summary['pages_requested']}` requested  ",
         f"Samples per page: `{config['samples_per_page']}`  ",
+        f"Pseudo probability mode: `{'conditioned on each sampled thought' if config.get('condition_pseudo_on_thinking') else 'single no-thinking probe per page'}`  ",
         f"Temperature: `{config['temperature']}`",
         "",
         "## Aggregate results",
@@ -523,6 +738,14 @@ def format_markdown_summary(report: dict[str, Any]) -> str:
         "| ASIN | Category | Actions | Recognized | TV | JS (nats) | Bootstrap p |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
+    if "conditioned_pseudo_probes" in summary:
+        metric_insert = lines.index("", lines.index("| Metric | Value |"))
+        lines[metric_insert:metric_insert] = [
+            f"| Thinking-conditioned pseudo probes | {summary['conditioned_pseudo_probes']} |",
+            f"| Complete-thinking fraction | {display(summary['complete_thinking_fraction'])} |",
+            f"| Conditioned top-action agreement | {display(summary['conditioned_top_action_agreement'])} |",
+            f"| Mean probability assigned to projected action | {display(summary['mean_probability_assigned_to_projected_action'])} |",
+        ]
     for page in report["pages"]:
         monte_carlo = page["monte_carlo"]
         comparison = page["comparison_conditional_on_recognized_action"]
@@ -538,7 +761,9 @@ def format_markdown_summary(report: dict[str, Any]) -> str:
             "",
             "## Interpretation",
             "",
-            "TV and Jensen-Shannon are effect sizes; smaller is closer. The bootstrap p-value tests the multinomial null that recognized actions came from the pseudo distribution. The BH-FDR count corrects the page-level tests for multiple comparisons.",
+            "TV and Jensen-Shannon are effect sizes; smaller is closer. The bootstrap p-value tests whether recognized actions came from the pseudo distribution. "
+            "It uses a multinomial null in the default mode and the individual conditional distributions' Poisson-multinomial null in thinking-conditioned mode. "
+            "The BH-FDR count corrects the page-level tests for multiple comparisons.",
             "",
             "Comparisons are conditional on the completion mapping to an admissible action, matching the forced-choice pseudo distribution. "
             "The recognized-action and format-valid rates must therefore be considered alongside the conditional fit. Full action counts, "
@@ -571,7 +796,7 @@ def _engine_model_limit(inference_engine: Any) -> int:
 
 
 def _validate_run_arguments(args: argparse.Namespace) -> None:
-    for name in ("num_pages", "samples_per_page", "bootstrap_replicates", "max_new_tokens", "page_batch_size", "tensor_parallel_size"):
+    for name in ("num_pages", "samples_per_page", "bootstrap_replicates", "max_new_tokens", "page_batch_size", "pseudo_score_batch_size", "tensor_parallel_size"):
         _validate_positive_integer(getattr(args, name), name)
     if args.max_model_len is not None:
         _validate_positive_integer(args.max_model_len, "max_model_len")
@@ -620,12 +845,16 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
     inference_engine = LLM(**engine_kwargs)
     model_limit = _engine_model_limit(inference_engine)
 
-    eligible_indices = [index for index, (real_ids, pseudo) in enumerate(zip(real_prompt_ids, pseudo_rollouts)) if len(real_ids) + args.max_new_tokens <= model_limit and len(pseudo.prompt_token_ids) + 1 <= model_limit]
+    eligible_indices = [
+        index
+        for index, (real_ids, pseudo) in enumerate(zip(real_prompt_ids, pseudo_rollouts))
+        if len(real_ids) + args.max_new_tokens <= model_limit and len(pseudo.prompt_token_ids) + 1 <= model_limit and (not args.condition_pseudo_on_thinking or len(pseudo.prompt_token_ids) + args.max_new_tokens + 1 <= model_limit)
+    ]
     eligible_index_set = set(eligible_indices)
     omitted = [
         {
             "asin": pages[index].asin,
-            "reason": "real or pseudo prompt exceeds the model context limit",
+            "reason": "real, pseudo, or worst-case thinking-conditioned pseudo prompt exceeds the model context limit",
             "real_prompt_tokens": len(real_prompt_ids[index]),
             "pseudo_prompt_tokens": len(pseudo_rollouts[index].prompt_token_ids),
         }
@@ -638,10 +867,12 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
     pages = tuple(pages[index] for index in eligible_indices)
     pseudo_rollouts = tuple(pseudo_rollouts[index] for index in eligible_indices)
     real_prompt_ids = tuple(real_prompt_ids[index] for index in eligible_indices)
-    logger.info("Scoring %d pseudo-rollout prompts", len(pages))
-    pseudo_scores = score_product_page_pseudo_rollouts(inference_engine, pseudo_rollouts, max_model_len=model_limit)
-    if any(score is None for score in pseudo_scores):
-        raise RuntimeError("An eligible pseudo-rollout unexpectedly produced no score")
+    pseudo_scores = None
+    if not args.condition_pseudo_on_thinking:
+        logger.info("Scoring %d pseudo-rollout prompts", len(pages))
+        pseudo_scores = score_product_page_pseudo_rollouts(inference_engine, pseudo_rollouts, max_model_len=model_limit)
+        if any(score is None for score in pseudo_scores):
+            raise RuntimeError("An eligible pseudo-rollout unexpectedly produced no score")
 
     logger.info("Sampling %d real completions for each of %d pages", args.samples_per_page, len(pages))
     completion_batches = sample_real_prompt_completions(
@@ -654,10 +885,42 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
         seed=args.seed + 10_000,
         page_batch_size=args.page_batch_size,
     )
+    conditioned_page_scores = None
+    thinking_prefix_batches = None
+    if args.condition_pseudo_on_thinking:
+        total_probes = sum(len(completions) for completions in completion_batches)
+        logger.info("Scoring %d pseudo-rollout prompts conditioned on sampled thinking", total_probes)
+        conditioned_page_scores, thinking_prefix_batches = score_thinking_conditioned_pseudo_rollouts(
+            inference_engine,
+            tokenizer,
+            pseudo_rollouts,
+            completion_batches,
+            max_model_len=model_limit,
+            batch_size=args.pseudo_score_batch_size,
+        )
+
     page_results = []
-    for index, (page, pseudo, score, completions, prompt_ids) in enumerate(zip(pages, pseudo_rollouts, pseudo_scores, completion_batches, real_prompt_ids)):
-        assert score is not None
+    for index, (page, pseudo, completions, prompt_ids) in enumerate(zip(pages, pseudo_rollouts, completion_batches, real_prompt_ids)):
         empirical = project_completions(completions, page.context_parts.admissible_actions)
+        result_kwargs = {}
+        if args.condition_pseudo_on_thinking:
+            assert conditioned_page_scores is not None and thinking_prefix_batches is not None
+            sample_scores = conditioned_page_scores[index]
+            recognized_action_set = {action.lower() for action in page.context_parts.admissible_actions}
+            recognized_scores = [score for score, action in zip(sample_scores, empirical.projected_actions) if action.lower() in recognized_action_set]
+            score = average_pseudo_rollout_scores(recognized_scores or sample_scores)
+            all_sample_score = average_pseudo_rollout_scores(sample_scores)
+            conditioned_records = build_conditioned_rollout_records(pseudo, sample_scores, thinking_prefix_batches[index], empirical)
+            result_kwargs = {
+                "pseudo_probability_mode": "mean_conditioned_on_sampled_thinking_for_recognized_actions",
+                "all_sample_scores": all_sample_score,
+                "conditioned_rollouts": conditioned_records,
+                "conditioned_comparison_scores": recognized_scores or None,
+            }
+        else:
+            assert pseudo_scores is not None
+            score = pseudo_scores[index]
+            assert score is not None
         page_results.append(
             build_page_result(
                 page,
@@ -667,6 +930,7 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
                 real_prompt_tokens=len(prompt_ids),
                 bootstrap_replicates=args.bootstrap_replicates,
                 seed=args.seed + 100_000 + index,
+                **result_kwargs,
             )
         )
 
@@ -690,6 +954,8 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
             "tensor_parallel_size": args.tensor_parallel_size,
             "dtype": args.dtype,
             "required_max_logprobs": required_logprobs,
+            "condition_pseudo_on_thinking": args.condition_pseudo_on_thinking,
+            "pseudo_score_batch_size": args.pseudo_score_batch_size,
             "history_omitted": True,
             "goal_source": "WebShop get_goals(..., human_goals=False)",
             "available_training_goals": len(goals),
@@ -718,6 +984,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--max-model-len", type=int, help="Optional vLLM model context limit")
     parser.add_argument("--page-batch-size", type=int, default=8, help="Number of distinct real prompts submitted per vLLM call")
+    parser.add_argument("--pseudo-score-batch-size", type=int, default=1024, help="Conditioned pseudo prompts submitted per vLLM call")
+    parser.add_argument(
+        "--condition-pseudo-on-thinking",
+        action="store_true",
+        help="Score one pseudo prompt per Monte Carlo completion after appending that completion's complete <think> block",
+    )
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.8)
     parser.add_argument("--dtype", default="auto")

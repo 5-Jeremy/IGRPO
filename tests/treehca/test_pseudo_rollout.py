@@ -210,6 +210,35 @@ def test_native_vllm_scoring_combines_bare_and_spaced_variants(tokenizer, parts)
     assert scores.entropy > 0.0
 
 
+def test_scoring_can_condition_each_row_on_assistant_response_prefix_tokens(tokenizer, parts):
+    prepared = prepare_product_page_pseudo_rollouts(
+        [replace(parts, admissible_actions=("click[first]", "click[second]"))],
+        tokenizer,
+    )
+    engine = _FakeInferenceEngine()
+
+    results = score_product_page_pseudo_rollouts(
+        engine,
+        prepared,
+        assistant_response_prefix_token_ids=[(901, 902, 903)],
+    )
+
+    assert results[0] is not None
+    assert engine.calls[0]["prompts"] == [{"prompt_token_ids": [*prepared[0].prompt_token_ids, 901, 902, 903]}]
+
+
+def test_scoring_validates_assistant_response_prefix_alignment(tokenizer, parts):
+    prepared = prepare_product_page_pseudo_rollouts(
+        [replace(parts, admissible_actions=("click[first]", "click[second]"))],
+        tokenizer,
+    )
+
+    with pytest.raises(ValueError, match="must align"):
+        score_product_page_pseudo_rollouts(_FakeInferenceEngine(), prepared, assistant_response_prefix_token_ids=[])
+    with pytest.raises(ValueError, match="integer token IDs"):
+        score_product_page_pseudo_rollouts(_FakeInferenceEngine(), prepared, assistant_response_prefix_token_ids=[(True,)])
+
+
 def test_overlength_pseudo_rollout_is_skipped_without_reaching_vllm(tokenizer, parts):
     prepared = prepare_product_page_pseudo_rollouts(
         [

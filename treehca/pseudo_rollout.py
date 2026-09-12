@@ -344,18 +344,38 @@ def score_product_page_pseudo_rollouts(
     *,
     max_model_len: int | None = None,
     lora_request: Any = None,
+    assistant_response_prefix_token_ids: Sequence[Sequence[int]] | None = None,
 ) -> list[ProductPagePseudoRolloutScores | None]:
     """Run one constrained vLLM step and return action distributions in input order.
+
+    ``assistant_response_prefix_token_ids`` optionally supplies one already
+    generated assistant-response prefix per row. The scorer appends each prefix
+    after the pseudo prompt's assistant boundary and measures the next-token
+    action distribution conditioned on it. This is useful for retaining sampled
+    thinking before replacing the original ``<action>`` with a choice label.
+    Prefixes must be token IDs from the same tokenizer as the prepared prompts.
 
     Rows without room for the required output token are skipped and represented
     by ``None``. The engine must be initialized with ``max_logprobs`` at least as
     large as :func:`required_max_logprobs` for the submitted batch.
     """
     pseudo_rollouts = tuple(pseudo_rollouts)
+    if assistant_response_prefix_token_ids is None:
+        response_prefixes = ((),) * len(pseudo_rollouts)
+    else:
+        if isinstance(assistant_response_prefix_token_ids, (str, bytes)):
+            raise ValueError("assistant_response_prefix_token_ids must be a sequence of token-ID sequences")
+        response_prefixes = tuple(tuple(prefix) for prefix in assistant_response_prefix_token_ids)
+        if len(response_prefixes) != len(pseudo_rollouts):
+            raise ValueError("assistant_response_prefix_token_ids must align with pseudo_rollouts")
+        for row, prefix in enumerate(response_prefixes):
+            if any(isinstance(token_id, bool) or not isinstance(token_id, int) for token_id in prefix):
+                raise ValueError(f"Assistant response prefix {row} must contain only integer token IDs")
     if not pseudo_rollouts:
         return []
     model_limit = _resolve_max_model_len(inference_engine, max_model_len)
-    scorable_indices = [index for index, item in enumerate(pseudo_rollouts) if len(item.prompt_token_ids) + 1 <= model_limit]
+    conditioned_prompt_token_ids = tuple((*item.prompt_token_ids, *prefix) for item, prefix in zip(pseudo_rollouts, response_prefixes))
+    scorable_indices = [index for index, token_ids in enumerate(conditioned_prompt_token_ids) if len(token_ids) + 1 <= model_limit]
     scorable_index_set = set(scorable_indices)
     for index, item in enumerate(pseudo_rollouts):
         if index not in scorable_index_set:
@@ -379,7 +399,7 @@ def score_product_page_pseudo_rollouts(
     except ImportError as error:
         raise RuntimeError("vLLM is required to score product-page pseudo-rollouts") from error
 
-    prompts = [{"prompt_token_ids": list(item.prompt_token_ids)} for item in selected]
+    prompts = [{"prompt_token_ids": list(conditioned_prompt_token_ids[index])} for index in scorable_indices]
     sampling_params = [
         SamplingParams(
             n=1,

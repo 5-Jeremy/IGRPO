@@ -117,6 +117,57 @@ The program performs real GPU inference and can be expensive. With the defaults,
 20 pages and 256 samples produce 5,120 full agent responses in addition to 20
 single-token pseudo probes.
 
+### Conditioning on each sampled thought
+
+The default testbed computes one pseudo distribution per product page before
+sampling the ordinary agent responses. An alternate paired mode computes a
+separate pseudo distribution for every Monte Carlo response, conditioned on
+that response's complete sampled `<think>...</think>` token prefix:
+
+```bash
+conda run --no-capture-output -n webshop \
+  python -m treehca.pseudo_rollout_testbed \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
+  --num-pages 20 \
+  --samples-per-page 256 \
+  --condition-pseudo-on-thinking \
+  --pseudo-score-batch-size 1024 \
+  --output outputs/pseudo_rollout_thinking_calibration.json
+```
+
+For a well-formed response, the exact generated token IDs through the first
+closing `</think>` tag are appended to the pseudo prompt's assistant boundary.
+The action itself is never included. A response without a complete thinking
+block is still scored with an empty prefix and marked
+`no_complete_thinking_block`; consequently, the mode always produces one probe
+per Monte Carlo response.
+
+The JSON adds `conditioned_pseudo_rollouts` to each page. Every record contains
+the sample index, thinking-prefix length and status, projected action/label,
+format validity, entropy, the complete label-probability distribution, the
+probability assigned to the projected action, and a tie-aware conditional
+top-action match flag. It intentionally omits the decoded chain-of-thought
+text to keep the report size manageable. `--pseudo-score-batch-size` limits
+how many one-token probes are submitted in each vLLM call; lowering it reduces
+peak request/output memory.
+Page and aggregate summaries include the paired top-action agreement and mean
+probability assigned to the projected action.
+
+The page-level `pseudo_probability` is the mean of the conditioned
+distributions for completions that projected to a recognized action, matching
+the empirical distribution's conditioning. `pseudo_probability_all_samples`
+also reports the unconditional mean over every generated response. Statistical
+bootstrap samples use each recognized response's own distribution, forming a
+Poisson-multinomial null rather than treating all thoughts as identically
+distributed.
+
+This mode is substantially more expensive: the example above performs 5,120
+additional one-token pseudo probes instead of 20. Pages are conservatively
+checked against `max_model_len` using the full `--max-new-tokens` allowance, so
+every generated thinking prefix is guaranteed to fit. Without
+`--condition-pseudo-on-thinking`, inference and report behavior remain on the
+original single-probe-per-page path.
+
 ## Output and interpretation
 
 The JSON file is the complete machine-readable result. It contains the model

@@ -221,6 +221,23 @@ would require reinstating an indexed-logit capture mechanism or changing vLLM;
 forcing each variant in a separate request would be public-API compatible but
 substantially more expensive.
 
+### Optional assistant-response conditioning
+
+`score_product_page_pseudo_rollouts` normally scores the first assistant token
+immediately after the pseudo prompt, preserving its original behavior. Its
+optional `assistant_response_prefix_token_ids` argument instead accepts one
+token-ID sequence per pseudo rollout. Each sequence is appended after that
+row's assistant-generation boundary before the constrained label token is
+scored. This allows callers to preserve an already-sampled `<think>...</think>`
+prefix while replacing the response's original action with a multiple-choice
+label.
+
+The caller must provide token IDs generated with the same tokenizer as the
+prepared prompt. Passing token IDs, rather than decoded text, preserves the
+actual sampled tokenization and avoids re-tokenizing every reasoning trace.
+Length filtering includes the prefix. Empty prefixes are valid, and omitting
+the argument entirely follows the original path.
+
 Before scoring with a new model or chat template, check the actual tokenized
 assistant-response boundary. The builder only returns a raw body, so it cannot
 validate a chat wrapper that has not yet been supplied. Batch preparation now

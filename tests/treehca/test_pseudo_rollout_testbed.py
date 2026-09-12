@@ -11,8 +11,13 @@ from treehca.pseudo_rollout import ActionChoiceScore, ProductPagePseudoRollout, 
 from treehca.pseudo_rollout_testbed import (
     EmpiricalActionSamples,
     RenderedProductPage,
+    SampledAgentResponse,
+    ThinkingPrefix,
+    average_pseudo_rollout_scores,
+    build_conditioned_rollout_records,
     build_page_result,
     compare_action_distributions,
+    extract_thinking_prefix,
     format_markdown_summary,
     project_completions,
     sample_diverse_products,
@@ -115,6 +120,19 @@ def test_distribution_comparison_reports_effect_size_and_bootstrap_test():
     assert empty["parametric_bootstrap_p_value"] is None
 
 
+def test_distribution_comparison_supports_nonidentical_conditioned_null_rows():
+    result = compare_action_distributions(
+        [0.5, 0.5],
+        [1, 1],
+        bootstrap_replicates=100,
+        seed=3,
+        per_sample_expected_probabilities=[[1.0, 0.0], [0.0, 1.0]],
+    )
+
+    assert result["bootstrap_null"] == "poisson_multinomial_from_conditioned_rows"
+    assert result["parametric_bootstrap_p_value"] == 1.0
+
+
 class _FakeSamplingEngine:
     def __init__(self):
         self.calls = []
@@ -147,7 +165,8 @@ def test_real_prompt_sampling_uses_one_n_way_request_per_page():
         page_batch_size=2,
     )
 
-    assert completions == (("0-0", "0-1", "0-2"), ("1-0", "1-1", "1-2"))
+    assert [[completion.text for completion in page] for page in completions] == [["0-0", "0-1", "0-2"], ["1-0", "1-1", "1-2"]]
+    assert [[completion.token_ids for completion in page] for page in completions] == [[(0, 0), (0, 1), (0, 2)], [(1, 0), (1, 1), (1, 2)]]
     assert len(engine.calls) == 1
     call = engine.calls[0]
     assert call["prompts"] == [{"prompt_token_ids": [1, 2]}, {"prompt_token_ids": [3, 4]}]
@@ -155,6 +174,33 @@ def test_real_prompt_sampling_uses_one_n_way_request_per_page():
     assert [params.seed for params in call["sampling_params"]] == [10, 11]
     assert all(params.max_tokens == 20 and params.temperature == 1.0 for params in call["sampling_params"])
     assert all(params.top_p == 1.0 and params.top_k == -1 for params in call["sampling_params"])
+
+
+class _ThinkingTokenizer:
+    fragments = {1: "<think>", 2: "reason", 3: "</think>", 4: "<action>", 5: "click[first]"}
+
+    def decode(self, token_ids, **kwargs):
+        assert kwargs == {"skip_special_tokens": True}
+        return "".join(self.fragments[token_id] for token_id in token_ids)
+
+
+def test_extract_thinking_prefix_keeps_exact_generated_tokens_through_closing_tag():
+    completion = SampledAgentResponse("<think>reason</think><action>click[first]", (1, 2, 3, 4, 5))
+
+    prefix = extract_thinking_prefix(completion, _ThinkingTokenizer())
+
+    assert prefix.token_ids == (1, 2, 3)
+    assert prefix.text == "<think>reason</think>"
+    assert prefix.status == "complete_thinking_block"
+
+
+def test_extract_thinking_prefix_uses_empty_prefix_for_malformed_thinking():
+    completion = SampledAgentResponse("reason<action>click[first]", (2, 4, 5))
+
+    prefix = extract_thinking_prefix(completion, _ThinkingTokenizer())
+
+    assert prefix.token_ids == ()
+    assert prefix.status == "no_complete_thinking_block"
 
 
 def _page_inputs():
@@ -180,6 +226,71 @@ def _page_inputs():
     )
     empirical = EmpiricalActionSamples((6, 4), 12, 11, 10, 1, 1, 2, ({"response": "bad", "projected_action": "bad", "reason": "inadmissible_action"},))
     return page, pseudo, scores, empirical
+
+
+def test_average_pseudo_scores_averages_each_aligned_action():
+    _, _, first, _ = _page_inputs()
+    second = ProductPagePseudoRolloutScores(
+        choices=(
+            ActionChoiceScore("A", "click[first]", 0.2, -1.6094379124, -1.0, -1.0),
+            ActionChoiceScore("B", "click[second]", 0.8, -0.2231435513, -1.0, -1.0),
+        )
+    )
+
+    average = average_pseudo_rollout_scores([first, second])
+
+    assert average.label_probabilities == pytest.approx({"A": 0.4, "B": 0.6})
+
+
+def test_conditioned_page_result_retains_every_probe_and_uses_conditioned_bootstrap():
+    page, pseudo, first, _ = _page_inputs()
+    second = ProductPagePseudoRolloutScores(
+        choices=(
+            ActionChoiceScore("A", "click[first]", 0.2, -1.6094379124, -1.0, -1.0),
+            ActionChoiceScore("B", "click[second]", 0.8, -0.2231435513, -1.0, -1.0),
+        )
+    )
+    empirical = EmpiricalActionSamples(
+        (1, 1),
+        2,
+        2,
+        2,
+        0,
+        0,
+        0,
+        (),
+        projected_actions=("click[first]", "click[second]"),
+        format_valids=(1, 1),
+    )
+    thinking = (
+        ThinkingPrefix((101, 102), "<think>one</think>", "complete_thinking_block"),
+        ThinkingPrefix((), "", "no_complete_thinking_block"),
+    )
+    records = build_conditioned_rollout_records(pseudo, [first, second], thinking, empirical)
+    average = average_pseudo_rollout_scores([first, second])
+
+    result = build_page_result(
+        page,
+        pseudo,
+        average,
+        empirical,
+        real_prompt_tokens=7,
+        bootstrap_replicates=100,
+        seed=2,
+        pseudo_probability_mode="mean_conditioned_on_sampled_thinking_for_recognized_actions",
+        all_sample_scores=average,
+        conditioned_rollouts=records,
+        conditioned_comparison_scores=[first, second],
+    )
+
+    assert len(result["conditioned_pseudo_rollouts"]) == 2
+    assert result["conditioned_pseudo_rollouts"][0]["projected_label"] == "A"
+    assert result["conditioned_pseudo_rollouts"][0]["projected_action_probability"] == pytest.approx(0.6)
+    assert result["conditioned_pseudo_rollouts"][0]["projected_action_is_pseudo_argmax"] is True
+    assert result["complete_thinking_fraction"] == 0.5
+    assert result["conditioned_top_action_agreement"] == 1.0
+    assert result["actions"][0]["pseudo_probability_all_samples"] == pytest.approx(0.4)
+    assert result["comparison_conditional_on_recognized_action"]["bootstrap_null"] == "poisson_multinomial_from_conditioned_rows"
 
 
 def test_page_and_aggregate_reports_are_serializable_and_human_readable(tmp_path: Path):
