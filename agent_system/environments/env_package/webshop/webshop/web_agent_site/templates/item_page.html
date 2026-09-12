@@ -62,11 +62,6 @@
                 <button class="btn btn-primary" type="submit">Features</button>
               </form>
             </div>
-            <div class="col-sm-3" name="reviews">
-              <form method="post" action="{{ url_for('item_sub_page', session_id=session_id, asin=asin, keywords=keywords, page=page, sub_page='Reviews', options=options) }}">
-                <button class="btn btn-primary" type="submit">Reviews</button>
-              </form>
-            </div>
             {% if show_attrs %}
             <div class="col-sm-3" name="attributes">
               <form method="post" action="{{ url_for('item_sub_page', session_id=session_id, asin=asin, keywords=keywords, page=page, sub_page='Attributes', options=options) }}">
