@@ -1,6 +1,6 @@
 # Pseudo-rollout probability testbed
 
-[`pseudo_rollout_testbed.py`](../../treehca/pseudo_rollout_testbed.py) tests
+[`pseudo_rollout_product_page_choices_testbed.py`](../../treehca/pseudo_rollout_product_page_choices_testbed.py) tests
 whether the forced-choice probabilities produced by the pseudo-rollout prompt
 agree with actions sampled from the ordinary WebShop agent prompt. It is a
 standalone evaluation program. It does not start WebShop, mutate an environment,
@@ -81,7 +81,7 @@ overriding it.
 
 ```bash
 conda run --no-capture-output -n webshop \
-  python -m treehca.pseudo_rollout_testbed \
+  python -m treehca.pseudo_rollout_product_page_choices_testbed \
   --model Qwen/Qwen2.5-1.5B-Instruct \
   --num-pages 20 \
   --samples-per-page 256 \
@@ -126,7 +126,7 @@ that response's sampled thinking:
 
 ```bash
 conda run --no-capture-output -n webshop \
-  python -m treehca.pseudo_rollout_testbed \
+  python -m treehca.pseudo_rollout_product_page_choices_testbed \
   --model Qwen/Qwen2.5-1.5B-Instruct \
   --num-pages 20 \
   --samples-per-page 256 \
@@ -200,13 +200,13 @@ The JSON remains authoritative.
 
 ### Plotting a completed report
 
-[`analyze_pseudo_rollout_results.py`](../../treehca/analyze_pseudo_rollout_results.py)
+[`analyze_pseudo_rollout_product_page_choices_results.py`](../../treehca/analyze_pseudo_rollout_product_page_choices_results.py)
 turns a completed JSON report into the two requested scatter plots and a small
 analysis summary. It does not load a model or repeat inference.
 
 ```bash
 conda run --no-capture-output -n webshop \
-  python -m treehca.analyze_pseudo_rollout_results \
+  python -m treehca.analyze_pseudo_rollout_product_page_choices_results \
   outputs/pseudo_rollout_calibration.json
 ```
 

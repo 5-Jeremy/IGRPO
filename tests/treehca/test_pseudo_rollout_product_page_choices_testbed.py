@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from treehca.product_page_parser import ProductPageContextParts
-from treehca.pseudo_rollout import ActionChoiceScore, ProductPagePseudoRollout, ProductPagePseudoRolloutScores
-from treehca.pseudo_rollout_testbed import (
+from treehca.pseudo_rollout_product_page import ActionChoiceScore, ProductPagePseudoRollout, ProductPagePseudoRolloutScores
+from treehca.pseudo_rollout_product_page_choices_testbed import (
     EmpiricalActionSamples,
     RenderedProductPage,
     SampledAgentResponse,

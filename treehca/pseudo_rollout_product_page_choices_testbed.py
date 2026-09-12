@@ -17,7 +17,7 @@ from typing import Any, Callable, Sequence
 import numpy as np
 
 from treehca.product_page_parser import ProductPageContextParts, extract_product_page_contexts, parse_product_page_fields
-from treehca.pseudo_rollout import ActionChoiceScore, ProductPagePseudoRollout, ProductPagePseudoRolloutScores, prepare_product_page_pseudo_rollouts, required_max_logprobs, score_product_page_pseudo_rollouts
+from treehca.pseudo_rollout_product_page import ActionChoiceScore, ProductPagePseudoRollout, ProductPagePseudoRolloutScores, prepare_product_page_pseudo_rollouts, required_max_logprobs, score_product_page_pseudo_rollouts
 
 logger = logging.getLogger(__name__)
 
@@ -804,7 +804,7 @@ def _validate_run_arguments(args: argparse.Namespace) -> None:
 def _configure_vllm_engine() -> None:
     """Select V0, whose returned logprobs include the allowed-token mask."""
     if "vllm" in sys.modules:
-        raise RuntimeError("The testbed must configure VLLM_USE_V1 before vLLM is imported; run it as `python -m treehca.pseudo_rollout_testbed`")
+        raise RuntimeError("The testbed must configure VLLM_USE_V1 before vLLM is imported; run it as `python -m treehca.pseudo_rollout_product_page_choices_testbed`")
     if os.environ.get("VLLM_USE_V1") == "1":
         logger.warning("Overriding VLLM_USE_V1=1 because vLLM 0.8.5 V1 reports logprobs before applying allowed_token_ids")
     os.environ["VLLM_USE_V1"] = "0"

@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from treehca.analyze_pseudo_rollout_results import analyze_report, write_plots, write_summaries
+from treehca.analyze_pseudo_rollout_product_page_choices_results import analyze_report, write_plots, write_summaries
 
 
 def _report():

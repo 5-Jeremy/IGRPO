@@ -11,7 +11,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from treehca.product_page_parser import extract_product_page_contexts
-from treehca.pseudo_rollout import (
+from treehca.pseudo_rollout_product_page import (
     build_action_label_catalog,
     build_product_page_pseudo_rollout_prompt,
     prepare_product_page_pseudo_rollouts,

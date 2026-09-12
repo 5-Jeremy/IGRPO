@@ -1,6 +1,6 @@
 # Action-choice pseudo-rollout prompts and scoring
 
-[`pseudo_rollout.py`](../../treehca/pseudo_rollout.py) builds a raw prompt body
+[`pseudo_rollout_product_page.py`](../../treehca/pseudo_rollout_product_page.py) builds a raw prompt body
 from the components returned by the [product-page parser](product_page_parser_assumptions.md).
 It also prepares tokenized batches and uses one constrained vLLM generation step
 to compute a forced-choice distribution over the admissible actions.
@@ -292,7 +292,7 @@ drop-in substitute and an indexed-logit capture path would again be required.
 
 ```python
 from treehca.product_page_parser import extract_product_page_contexts
-from treehca.pseudo_rollout import (
+from treehca.pseudo_rollout_product_page import (
     build_action_label_catalog,
     prepare_product_page_pseudo_rollouts,
     required_max_logprobs,
@@ -325,11 +325,11 @@ construction remains a caller policy. No such training policy is added here.
 
 For an end-to-end empirical check of whether these probabilities agree with
 actions sampled from ordinary WebShop prompts, see the
-[pseudo-rollout probability testbed](pseudo_rollout_testbed.md).
+[pseudo-rollout probability testbed](pseudo_rollout_product_page_choices_testbed.md).
 
 ## Validation
 
-[`test_pseudo_rollout.py`](../../tests/treehca/test_pseudo_rollout.py) verifies:
+[`test_pseudo_rollout_product_page.py`](../../tests/treehca/test_pseudo_rollout_product_page.py) verifies:
 
 - All 55 labels and their 110 distinct single-token variants, using the cached
   configured tokenizer, including the actual assistant-response boundary.

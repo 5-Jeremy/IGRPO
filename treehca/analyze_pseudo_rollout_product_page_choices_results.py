@@ -1,7 +1,7 @@
 """Analyze probability calibration in a pseudo-rollout testbed JSON report.
 
 Example:
-    python -m treehca.analyze_pseudo_rollout_results \
+    python -m treehca.analyze_pseudo_rollout_product_page_choices_results \
         outputs/pseudo_rollout_calibration.json
 """
 
