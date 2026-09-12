@@ -122,7 +122,7 @@ single-token pseudo probes.
 The default testbed computes one pseudo distribution per product page before
 sampling the ordinary agent responses. An alternate paired mode computes a
 separate pseudo distribution for every Monte Carlo response, conditioned on
-that response's complete sampled `<think>...</think>` token prefix:
+that response's sampled thinking:
 
 ```bash
 conda run --no-capture-output -n webshop \
@@ -135,19 +135,31 @@ conda run --no-capture-output -n webshop \
   --output outputs/pseudo_rollout_thinking_calibration.json
 ```
 
-For a well-formed response, the exact generated token IDs through the first
-closing `</think>` tag are appended to the pseudo prompt's assistant boundary.
-The action itself is never included. A response without a complete thinking
-block is still scored with an empty prefix and marked
-`no_complete_thinking_block`; consequently, the mode always produces one probe
-per Monte Carlo response.
+For a well-formed response, the text is cut immediately before the first
+closing `</think>` tag. The remainder of the response, including the original
+action, is discarded, and a newline followed by
+`The best next action is:` is appended. The edited assistant prefix is
+re-tokenized because the cut can fall inside a sampled token. The constrained
+multiple-choice label is therefore the next model token. Conceptually, the
+assistant side sent to vLLM ends as follows:
+
+```text
+<think>...sampled reasoning...
+The best next action is:
+```
+
+A response without a complete thinking block is scored with only
+`The best next action is:` and marked `no_complete_thinking_block`;
+consequently, the mode always produces one probe per Monte Carlo response and
+never conditions on a partial thought or the sampled action.
 
 The JSON adds `conditioned_pseudo_rollouts` to each page. Every record contains
-the sample index, thinking-prefix length and status, projected action/label,
-format validity, entropy, the complete label-probability distribution, the
-probability assigned to the projected action, and a tie-aware conditional
-top-action match flag. It intentionally omits the decoded chain-of-thought
-text to keep the report size manageable. `--pseudo-score-batch-size` limits
+the sample index, edited assistant-prefix length and thinking status, projected
+action/label, format validity, entropy, the complete label-probability
+distribution, the probability assigned to the projected action, and a
+tie-aware conditional top-action match flag. It intentionally omits the
+decoded chain-of-thought text to keep the report size manageable.
+`--pseudo-score-batch-size` limits
 how many one-token probes are submitted in each vLLM call; lowering it reduces
 peak request/output memory.
 Page and aggregate summaries include the paired top-action agreement and mean

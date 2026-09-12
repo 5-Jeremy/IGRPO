@@ -183,23 +183,30 @@ class _ThinkingTokenizer:
         assert kwargs == {"skip_special_tokens": True}
         return "".join(self.fragments[token_id] for token_id in token_ids)
 
+    def encode(self, text, **kwargs):
+        assert kwargs == {"add_special_tokens": False}
+        return list(range(len(text)))
 
-def test_extract_thinking_prefix_keeps_exact_generated_tokens_through_closing_tag():
+
+def test_extract_thinking_prefix_replaces_closing_tag_and_action_with_decision_cue():
     completion = SampledAgentResponse("<think>reason</think><action>click[first]", (1, 2, 3, 4, 5))
 
     prefix = extract_thinking_prefix(completion, _ThinkingTokenizer())
 
-    assert prefix.token_ids == (1, 2, 3)
-    assert prefix.text == "<think>reason</think>"
+    assert prefix.token_ids == tuple(range(len(prefix.text)))
+    assert prefix.text == "<think>reason\nThe best next action is:"
+    assert "</think>" not in prefix.text
+    assert "<action>" not in prefix.text
     assert prefix.status == "complete_thinking_block"
 
 
-def test_extract_thinking_prefix_uses_empty_prefix_for_malformed_thinking():
+def test_extract_thinking_prefix_uses_only_decision_cue_for_malformed_thinking():
     completion = SampledAgentResponse("reason<action>click[first]", (2, 4, 5))
 
     prefix = extract_thinking_prefix(completion, _ThinkingTokenizer())
 
-    assert prefix.token_ids == ()
+    assert prefix.token_ids == tuple(range(len(prefix.text)))
+    assert prefix.text == "The best next action is:"
     assert prefix.status == "no_complete_thinking_block"
 
 

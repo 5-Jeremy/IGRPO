@@ -26,6 +26,7 @@ _WEBSHOP_ROOT = _ROOT / "agent_system/environments/env_package/webshop/webshop"
 _DEFAULT_CATALOG = _WEBSHOP_ROOT / "data/items_shuffle_1000.json"
 _DEFAULT_ATTRIBUTES = _WEBSHOP_ROOT / "data/items_ins_v2_1000.json"
 _DEFAULT_OUTPUT = _ROOT / "pseudo_rollout_calibration_report.json"
+_THINKING_DECISION_CUE = "The best next action is:"
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ class SampledAgentResponse:
 
 @dataclass(frozen=True)
 class ThinkingPrefix:
-    """The complete thinking prefix retained for a conditioned pseudo probe."""
+    """The edited assistant prefix retained for a conditioned pseudo probe."""
 
     token_ids: tuple[int, ...]
     text: str
@@ -292,32 +293,29 @@ def sample_real_prompt_completions(
 
 
 def extract_thinking_prefix(completion: SampledAgentResponse, tokenizer: Any) -> ThinkingPrefix:
-    """Return exact sampled tokens through the first complete ``</think>`` tag.
+    """Replace the first closing think tag and everything after it with a cue.
 
-    A malformed response gets an empty prefix so every Monte Carlo sample can
-    still be scored without conditioning on a partial thought or its action.
+    The returned prefix ends in ``The best next action is:`` so the constrained
+    label is the next token. A malformed response uses only that cue, allowing
+    every Monte Carlo sample to remain scoreable without retaining a partial
+    thought or its action.
     """
     think_start = completion.text.find("<think>")
     think_end = completion.text.find("</think>", think_start + len("<think>")) if think_start >= 0 else -1
     if think_start < 0 or think_end < 0:
-        return ThinkingPrefix(token_ids=(), text="", status="no_complete_thinking_block")
-
-    # Locate the first sampled-token prefix whose decoded text contains the
-    # complete closing tag. Binary search keeps this inexpensive for long CoTs.
-    low = 1
-    high = len(completion.token_ids)
-    while low < high:
-        middle = (low + high) // 2
-        decoded = tokenizer.decode(completion.token_ids[:middle], skip_special_tokens=True)
-        if "</think>" in decoded:
-            high = middle
-        else:
-            low = middle + 1
-    prefix_ids = completion.token_ids[:low]
-    prefix_text = tokenizer.decode(prefix_ids, skip_special_tokens=True)
-    if "</think>" not in prefix_text:
-        raise ValueError("Decoded completion contains </think>, but no generated-token prefix reproduces it")
-    return ThinkingPrefix(token_ids=prefix_ids, text=prefix_text, status="complete_thinking_block")
+        prefix_text = _THINKING_DECISION_CUE
+        status = "no_complete_thinking_block"
+    else:
+        # Re-tokenization is necessary because the source suffix is edited at a
+        # text boundary that need not coincide with a sampled-token boundary.
+        prefix_text = f"{completion.text[:think_end].rstrip()}\n{_THINKING_DECISION_CUE}"
+        status = "complete_thinking_block"
+    prefix_ids = tokenizer.encode(prefix_text, add_special_tokens=False)
+    if hasattr(prefix_ids, "tolist"):
+        prefix_ids = prefix_ids.tolist()
+    if not isinstance(prefix_ids, list) or any(isinstance(token_id, bool) or not isinstance(token_id, int) for token_id in prefix_ids):
+        raise ValueError("Tokenizer must encode the thinking-conditioned assistant prefix as integer token IDs")
+    return ThinkingPrefix(token_ids=tuple(prefix_ids), text=prefix_text, status=status)
 
 
 def score_thinking_conditioned_pseudo_rollouts(
@@ -548,7 +546,6 @@ def build_conditioned_rollout_records(
         raise ValueError("Empirical per-completion projection details are missing")
     action_to_label = {action.lower(): label for label, action in zip(pseudo_rollout.labels, pseudo_rollout.actions)}
     records = []
-    breakpoint()
     for sample_index, (score, thinking, projected_action, format_valid) in enumerate(zip(scores, thinking_prefixes, empirical.projected_actions, empirical.format_valids)):
         projected_label = action_to_label.get(projected_action.lower())
         maximum_probability = max(choice.probability for choice in score.choices)
@@ -557,7 +554,7 @@ def build_conditioned_rollout_records(
             {
                 "sample_index": sample_index,
                 "thinking_status": thinking.status,
-                "thinking_prefix_tokens": len(thinking.token_ids),
+                "assistant_prefix_tokens": len(thinking.token_ids),
                 "projected_action": projected_action,
                 "projected_label": projected_label,
                 "format_valid": bool(format_valid),
@@ -988,7 +985,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--condition-pseudo-on-thinking",
         action="store_true",
-        help="Score one pseudo prompt per Monte Carlo completion after appending that completion's complete <think> block",
+        help="Score one pseudo prompt per Monte Carlo completion after replacing </think> with 'The best next action is:'",
     )
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.8)

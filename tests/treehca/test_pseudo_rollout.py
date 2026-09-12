@@ -77,7 +77,10 @@ def test_only_action_entries_and_final_instructions_change(tokenizer, example, w
     assert label_to_action == dict(zip(labels, components.admissible_actions))
     original_action_block = "[\n" + "\n".join(f"'{action}'," for action in components.admissible_actions) + "\n]."
     expected_action_block = "[\n" + "\n".join(f"{label}: {action}" for label, action in zip(labels, components.admissible_actions)) + "\n]."
-    expected_footer = "Now it's your turn to take one action for the current step.\nYou must give the label corresponding to the action you want to take. You should only respond with a single label from the list"
+    expected_footer = (
+        "Now it's your turn to take one action for the current step.\n"
+        'You must give the label corresponding to the action you want to take. You should think about what is the logically best next action to take, and finish your thought with "The best next action is:" followed by the label of your chosen action.'
+    )
     # Independently edit the original body; all other bytes must agree apart from surrounding newlines.
     assert original.count(original_action_block) == 1
     expected = original.replace(original_action_block, expected_action_block).replace(components.response_instructions, expected_footer)

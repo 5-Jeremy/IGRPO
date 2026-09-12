@@ -11,7 +11,7 @@ from treehca.product_page_parser import ProductPageContextParts
 
 _LABEL_CANDIDATES = tuple(ascii_uppercase) + tuple("".join(pair) for pair in product(ascii_uppercase, repeat=2))
 _TURN_INSTRUCTION = "Now it's your turn to take one action for the current step."
-_CHOICE_INSTRUCTIONS = "You must give the label corresponding to the action you want to take. You should only respond with a single label from the list"
+_CHOICE_INSTRUCTIONS = "You must give the label corresponding to the action you want to take. You should think about what is the logically best next action to take, and finish your thought with \"The best next action is:\" followed by the label of your chosen action."
 logger = logging.getLogger(__name__)
 
 
