@@ -1,15 +1,24 @@
 """Prompt preservation and tokenizer-backed checks for action-choice labels."""
 
 import json
+import math
 import runpy
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from transformers import AutoTokenizer
 
 from treehca.product_page_parser import extract_product_page_contexts
-from treehca.pseudo_rollout import build_product_page_pseudo_rollout_prompt, select_action_labels
+from treehca.pseudo_rollout import (
+    build_action_label_catalog,
+    build_product_page_pseudo_rollout_prompt,
+    prepare_product_page_pseudo_rollouts,
+    required_max_logprobs,
+    score_product_page_pseudo_rollouts,
+    select_action_labels,
+)
 
 _ROOT = Path(__file__).resolve().parents[2]
 _TEMPLATES = runpy.run_path(str(_ROOT / "agent_system/environments/prompts/webshop.py"))
@@ -124,3 +133,133 @@ def test_invalid_action_counts_raise(tokenizer, count):
 
 def test_zero_actions_selects_no_labels(tokenizer):
     assert select_action_labels(tokenizer, 0) == ()
+
+
+def test_prepare_batch_reuses_catalog_and_tokenizes_chat_boundary(tokenizer, parts):
+    catalog = build_action_label_catalog(tokenizer, 3)
+    batch = prepare_product_page_pseudo_rollouts(
+        [
+            replace(parts, admissible_actions=("click[first]", "click[second]")),
+            replace(parts, admissible_actions=("click[third]", "click[fourth]", "click[fifth]")),
+        ],
+        tokenizer,
+        label_catalog=catalog,
+    )
+
+    assert len(batch) == 2
+    assert batch[0].labels == ("A", "B")
+    assert batch[0].actions == ("click[first]", "click[second]")
+    assert batch[0].variant_token_ids == tuple(entry.token_ids for entry in catalog.entries[:2])
+    assert len(batch[0].allowed_token_ids) == 4
+    assert len(batch[1].allowed_token_ids) == 6
+    assert required_max_logprobs(batch) == 6
+    assert list(batch[0].prompt_token_ids) == tokenizer.apply_chat_template(
+        [{"role": "user", "content": batch[0].prompt}],
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+
+
+class _FakeInferenceEngine:
+    def __init__(self, max_model_len=100_000, max_logprobs=110, omit_last_logprob=False):
+        self.llm_engine = SimpleNamespace(model_config=SimpleNamespace(max_model_len=max_model_len, max_logprobs=max_logprobs))
+        self.omit_last_logprob = omit_last_logprob
+        self.calls = []
+
+    def generate(self, **kwargs):
+        self.calls.append(kwargs)
+        outputs = []
+        for params in kwargs["sampling_params"]:
+            assert params.n == 1
+            assert params.max_tokens == 1
+            assert params.temperature == 1.0
+            assert params.top_p == 1.0
+            assert params.top_k == -1
+            assert params.min_p == 0.0
+            assert params.presence_penalty == 0.0
+            assert params.frequency_penalty == 0.0
+            assert params.repetition_penalty == 1.0
+            assert params.logprobs == len(params.allowed_token_ids)
+            assert params.detokenize is False
+
+            weights = list(range(1, len(params.allowed_token_ids) + 1))
+            total = sum(weights)
+            token_logprobs = {token_id: SimpleNamespace(logprob=math.log(weight / total)) for token_id, weight in zip(params.allowed_token_ids, weights)}
+            if self.omit_last_logprob:
+                token_logprobs.pop(params.allowed_token_ids[-1])
+            completion = SimpleNamespace(token_ids=[params.allowed_token_ids[-1]], logprobs=[token_logprobs])
+            outputs.append(SimpleNamespace(outputs=[completion]))
+        return outputs
+
+
+def test_native_vllm_scoring_combines_bare_and_spaced_variants(tokenizer, parts):
+    prepared = prepare_product_page_pseudo_rollouts(
+        [replace(parts, admissible_actions=("click[first]", "click[second]", "click[third]"))],
+        tokenizer,
+    )
+    engine = _FakeInferenceEngine()
+    results = score_product_page_pseudo_rollouts(engine, prepared)
+
+    assert len(engine.calls) == 1
+    assert len(engine.calls[0]["prompts"]) == 1
+    scores = results[0]
+    assert scores is not None
+    assert scores.label_probabilities == pytest.approx({"A": 3 / 21, "B": 7 / 21, "C": 11 / 21})
+    assert scores.action_probabilities == pytest.approx({"click[first]": 3 / 21, "click[second]": 7 / 21, "click[third]": 11 / 21})
+    assert sum(scores.label_probabilities.values()) == pytest.approx(1.0)
+    assert scores.entropy > 0.0
+
+
+def test_overlength_pseudo_rollout_is_skipped_without_reaching_vllm(tokenizer, parts):
+    prepared = prepare_product_page_pseudo_rollouts(
+        [
+            replace(parts, admissible_actions=("click[first]",)),
+            replace(parts, admissible_actions=("click[second]",)),
+        ],
+        tokenizer,
+    )
+    max_model_len = len(prepared[0].prompt_token_ids)
+    engine = _FakeInferenceEngine(max_model_len=max_model_len)
+    shorter = replace(prepared[1], prompt_token_ids=prepared[1].prompt_token_ids[: max_model_len - 1])
+
+    results = score_product_page_pseudo_rollouts(engine, [prepared[0], shorter])
+
+    assert results[0] is None
+    assert results[1] is not None
+    assert len(engine.calls[0]["prompts"]) == 1
+
+
+def test_scoring_rejects_missing_requested_logprob(tokenizer, parts):
+    prepared = prepare_product_page_pseudo_rollouts(
+        [replace(parts, admissible_actions=("click[first]", "click[second]"))],
+        tokenizer,
+    )
+    with pytest.raises(ValueError, match="omitted requested action-label token IDs"):
+        score_product_page_pseudo_rollouts(_FakeInferenceEngine(omit_last_logprob=True), prepared)
+
+
+def test_scoring_checks_engine_max_logprobs_before_generation(tokenizer, parts):
+    prepared = prepare_product_page_pseudo_rollouts(
+        [replace(parts, admissible_actions=("click[first]", "click[second]"))],
+        tokenizer,
+    )
+    engine = _FakeInferenceEngine(max_logprobs=3)
+
+    with pytest.raises(ValueError, match="max_logprobs is 3, but this batch requires 4"):
+        score_product_page_pseudo_rollouts(engine, prepared)
+    assert engine.calls == []
+
+
+def test_scoring_rejects_vllm_v1_unconstrained_logprobs(tokenizer, parts):
+    prepared = prepare_product_page_pseudo_rollouts(
+        [replace(parts, admissible_actions=("click[first]", "click[second]"))],
+        tokenizer,
+    )
+    engine = _FakeInferenceEngine()
+    v1_engine_type = type("LLMEngine", (), {"__module__": "vllm.v1.engine.llm_engine"})
+    engine.llm_engine = v1_engine_type()
+    engine.llm_engine.model_config = SimpleNamespace(max_model_len=100_000, max_logprobs=110)
+
+    with pytest.raises(ValueError, match="VLLM_USE_V1=0"):
+        score_product_page_pseudo_rollouts(engine, prepared)
+    assert engine.calls == []

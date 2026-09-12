@@ -1,0 +1,73 @@
+import json
+import math
+
+import pytest
+
+from treehca.analyze_pseudo_rollout_results import analyze_report, write_plots, write_summaries
+
+
+def _report():
+    return {
+        "pages": [
+            {
+                "asin": "match",
+                "actions": [
+                    {"label": "A", "action": "red", "pseudo_probability": 0.7, "empirical_probability_conditional": 0.6},
+                    {"label": "B", "action": "blue", "pseudo_probability": 0.3, "empirical_probability_conditional": 0.4},
+                ],
+            },
+            {
+                "asin": "empirical-tie",
+                "actions": [
+                    {"label": "A", "action": "small", "pseudo_probability": 0.4, "empirical_probability_conditional": 0.5},
+                    {"label": "B", "action": "large", "pseudo_probability": 0.6, "empirical_probability_conditional": 0.5},
+                ],
+            },
+            {
+                "asin": "no-recognized-actions",
+                "actions": [
+                    {"label": "A", "action": "buy", "pseudo_probability": 1.0, "empirical_probability_conditional": None},
+                ],
+            },
+        ]
+    }
+
+
+def test_analyze_report_computes_entropies_and_tie_aware_top_action_agreement():
+    analysis = analyze_report(_report())
+
+    assert analysis["pages_evaluated"] == 2
+    assert analysis["pages_excluded"] == 1
+    assert analysis["top_action_agreement"]["matching_pages"] == 2
+    assert analysis["top_action_agreement"]["fraction"] == 1.0
+    assert len(analysis["action_points"]) == 4
+    assert analysis["page_points"][0]["pseudo_entropy_nats"] == pytest.approx(-0.7 * math.log(0.7) - 0.3 * math.log(0.3))
+    assert analysis["page_points"][1]["empirical_top_labels"] == ["A", "B"]
+
+
+def test_analyze_report_rejects_partially_missing_empirical_distribution():
+    report = _report()
+    report["pages"][0]["actions"][1]["empirical_probability_conditional"] = None
+
+    with pytest.raises(ValueError, match="mixes missing and present"):
+        analyze_report(report)
+
+
+def test_writes_plots_and_machine_and_human_readable_summaries(tmp_path):
+    analysis = analyze_report(_report())
+    plot_paths = write_plots(analysis, tmp_path)
+    summary = {
+        "input_report": "input.json",
+        "pages_in_report": analysis["pages_in_report"],
+        "pages_evaluated": analysis["pages_evaluated"],
+        "pages_excluded": analysis["pages_excluded"],
+        "excluded_pages": analysis["excluded_pages"],
+        "top_action_agreement": analysis["top_action_agreement"],
+        "plots": plot_paths,
+        "page_results": analysis["page_points"],
+    }
+    json_path, markdown_path = write_summaries(summary, tmp_path)
+
+    assert all(tmp_path.joinpath(filename).stat().st_size > 0 for filename in ("probability_scatter_by_label.png", "entropy_scatter.png"))
+    assert json.loads(json_path.read_text())["top_action_agreement"]["fraction"] == 1.0
+    assert "Top-action agreement: **100.00%** (2/2)" in markdown_path.read_text()
