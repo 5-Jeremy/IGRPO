@@ -78,7 +78,7 @@ def test_all_1000_product_pages(monkeypatch):
             expected_products.append(
                 {
                     "navigation_controls": ("Back to Search", "< Prev"),
-                    "option_groups": tuple({"name": name, "values": tuple(values)} for name, values in product["options"].items()),
+                    "option_groups": tuple({"name": name, "values": tuple(values), "correct_options": ()} for name, values in product["options"].items()),
                     "title": product["Title"],
                     "price_text": product["Price"],
                     "rating_text": product["Rating"],

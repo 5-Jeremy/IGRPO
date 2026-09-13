@@ -29,10 +29,17 @@ class ProductPageContextParts:
 
 @dataclass(frozen=True)
 class ProductOptionGroup:
-    """Available option values, in display order; no selection state is inferred."""
+    """Available values and any known full-credit choices, in display order."""
 
     name: str
     values: tuple[str, ...]
+    correct_options: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if len(set(self.correct_options)) != len(self.correct_options):
+            raise ValueError("Correct options must not contain duplicates")
+        if any(option not in self.values for option in self.correct_options):
+            raise ValueError("Every correct option must be one of the group's available values")
 
 
 @dataclass(frozen=True)

@@ -81,9 +81,11 @@ parse_product_page_fields(
 
 `ProductPageFields` contains `navigation_controls`, `option_groups`, `title`,
 `price_text`, `rating_text`, `detail_page_controls`, and `purchase_control`.
-Each `ProductOptionGroup` contains `name` and `values`. Both result types, as
-well as `ProductPageContextParts`, are frozen dataclasses; sequence fields are
-tuples.
+Each `ProductOptionGroup` contains `name`, `values`, and `correct_options`.
+Context-only parsing leaves `correct_options` empty because goal metadata is
+not present in the rendered prompt; grouped pseudo-rollout construction fills
+it later. Both result types, as well as `ProductPageContextParts`, are frozen
+dataclasses; sequence fields are tuples.
 
 The functions can be composed explicitly:
 

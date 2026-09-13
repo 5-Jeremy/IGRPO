@@ -13,6 +13,22 @@ build_product_page_pseudo_rollout_prompt(
     tokenizer,
 ) -> tuple[str, dict[str, str]]
 
+build_product_page_grouped_choice_prompt(
+    parts: ProductPageContextParts,
+    tokenizer,
+    goal_options: Mapping[str, str],
+    *,
+    label_catalog=None,
+) -> tuple[ProductOptionGroupChoicePrompt, ...]
+
+prepare_product_page_grouped_choice_rollouts(
+    parts,
+    tokenizer,
+    goal_options_by_page,
+    *,
+    label_catalog=None,
+) -> tuple[ProductOptionGroupPseudoRollout, ...]
+
 select_action_labels(tokenizer, num_actions: int) -> tuple[str, ...]
 
 build_action_label_catalog(tokenizer, num_actions: int) -> ActionLabelCatalog
@@ -33,6 +49,15 @@ score_product_page_pseudo_rollouts(
     max_model_len=None,
     lora_request=None,
 ) -> list[ProductPagePseudoRolloutScores | None]
+
+score_product_page_grouped_choice_rollouts(
+    inference_engine,
+    pseudo_rollouts,
+    *,
+    max_model_len=None,
+    lora_request=None,
+    assistant_response_prefix_token_ids=None,
+) -> list[ProductOptionGroupPseudoRolloutScores | None]
 ```
 
 The tokenizer is supplied by the caller. Label selection requires Hugging
@@ -77,7 +102,7 @@ There are two substantive prompt changes:
 
    ```text
    Now it's your turn to take one action for the current step.
-   You must give the label corresponding to the action you want to take. You should only respond with a single label from the list
+   You must give the label corresponding to the action you want to take. You should think about what is the logically best next action to take, and finish your thought with "The best next action is:" followed by the label of your chosen action.
    ```
 
 The wording uses **label** instead of **capital letter** because a label may
@@ -89,6 +114,41 @@ wrapper, assistant prefix, sampled response, or appended answer label. Applying
 the scoring model's actual chat template belongs to
 `prepare_product_page_pseudo_rollouts`.
 History removal is also outside this builder's current contract.
+
+### Group-specific option prompts
+
+`build_product_page_grouped_choice_prompt` builds one prompt for each parsed
+product option group. Each prompt retains the task and observation but replaces
+the admissible-action block with letter-labeled bare option values for only that
+group, such as `A: red`; the displayed options do not use the environment's
+`click[...]` wrapper. Its instructions name the group explicitly and request
+one label. A product page without option groups returns an empty tuple.
+
+The caller supplies the active synthetic goal's `goal_options` mapping. For
+each group, `ProductOptionGroup.correct_options` contains every displayed value
+that matches the canonical goal value under WebShop's color normalization and
+fuzzy token-set threshold. `ProductOptionGroupChoicePrompt.correct_labels`
+provides the corresponding response labels in prompt order. Missing goal
+groups or groups with no matching displayed value raise `ValueError`; extra
+goal groups are allowed because an agent can be viewing a product with fewer
+option groups than the goal product.
+
+`prepare_product_page_grouped_choice_rollouts` accepts one goal mapping per
+source page and flattens the page/group hierarchy in page order, then group
+display order. Each `ProductOptionGroupPseudoRollout` records its
+`source_page_index` and `option_group`, while otherwise satisfying the ordinary
+`ProductPagePseudoRollout` contract. It can therefore be submitted directly to
+`score_product_page_pseudo_rollouts`. Assistant-response prefixes, when used,
+must align with this flattened group-rollout order.
+
+The prepared rollout's internal `actions` remain canonical WebShop
+`click[option]` strings. That metadata is not displayed in the group prompt; it
+keeps scores aligned with projected empirical environment actions.
+
+`score_product_page_grouped_choice_rollouts` is a thin group-aware wrapper over
+the unchanged generic scorer. Its results retain the source-page and group
+metadata and expose `correct_probability`, the sum of the probabilities of all
+fuzzy-equivalent correct options, and `correct_log_probability`.
 
 ## Why these letter labels
 
@@ -326,6 +386,8 @@ construction remains a caller policy. No such training policy is added here.
 For an end-to-end empirical check of whether these probabilities agree with
 actions sampled from ordinary WebShop prompts, see the
 [pseudo-rollout probability testbed](pseudo_rollout_product_page_choices_testbed.md).
+The corresponding experiment for per-group option probabilities is documented
+in the [grouped-choice probability testbed](pseudo_rollout_product_page_grouped_choices_testbed.md).
 
 ## Validation
 
