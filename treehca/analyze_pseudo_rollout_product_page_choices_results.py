@@ -1,8 +1,7 @@
 """Analyze probability calibration in a pseudo-rollout testbed JSON report.
 
 Example:
-    python -m treehca.analyze_pseudo_rollout_product_page_choices_results \
-        outputs/pseudo_rollout_calibration.json
+    python -m treehca.analyze_pseudo_rollout_product_page_choices_results
 """
 
 from __future__ import annotations
@@ -15,7 +14,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-_DEFAULT_INPUT = Path("outputs/pseudo_rollout_calibration.json")
+_ROOT = Path(__file__).resolve().parents[1]
+_RESULTS_ROOT = _ROOT / "pseudo_prob_test_results"
+_DEFAULT_INPUT = _RESULTS_ROOT / "pseudo_rollout_calibration_report.json"
 
 
 def _finite_probability(value: Any, field: str) -> float:

@@ -7,17 +7,21 @@ import pytest
 
 from treehca.product_page_parser import ProductOptionGroup, ProductPageContextParts
 from treehca.pseudo_rollout_product_page import ActionChoiceScore, ProductOptionGroupPseudoRollout, ProductOptionGroupPseudoRolloutScores
-from treehca.pseudo_rollout_product_page_choices_testbed import RenderedProductPage
+from treehca.pseudo_rollout_product_page_choices_testbed import RenderedProductPage, SampledAgentResponse
 from treehca.pseudo_rollout_product_page_grouped_choices_testbed import (
     EmpiricalGroupOptionSamples,
     GroupResponsePrefix,
     SelectedProductGoal,
+    average_group_pseudo_rollout_scores,
     build_argument_parser,
     build_artificial_group_response_prefixes,
+    build_generated_thinking_records,
     build_group_result,
+    extract_generated_group_thinking_prefix,
     format_markdown_summary,
     project_group_completions,
     sample_diverse_product_goals,
+    score_generated_thinking_group_pseudo_rollouts,
     summarize_group_results,
     write_report,
 )
@@ -103,7 +107,7 @@ def _group_inputs():
 
 
 def test_optional_denominator_includes_valid_non_options_but_not_other_groups():
-    page, pseudo, scores, _ = _group_inputs()
+    _, pseudo, _, _ = _group_inputs()
     completions = ["same red", "other size", "buy", "invalid", "same blue"]
 
     def projection(_responses):
@@ -125,17 +129,16 @@ def test_optional_denominator_includes_valid_non_options_but_not_other_groups():
     assert inclusive.different_group_option_completions == 1
     assert inclusive.inadmissible_completions == 1
     assert inclusive.recognized_with_invalid_format == 1
-    result = build_group_result(page, pseudo, scores, inclusive, real_prompt_tokens=20, bootstrap_replicates=100, seed=3)
-    assert sum(option["empirical_probability_conditional"] for option in result["options"]) == pytest.approx(2 / 3)
-    assert result["empirical_correct_probability_conditional"] == pytest.approx(1 / 3)
-    assert result["monte_carlo"]["recognized_group_option_completions"] == 2
-    assert result["monte_carlo"]["empirical_option_probability_denominator"] == 3
+    assert default.denominator_inclusions == (True, False, False, False, True)
+    assert inclusive.denominator_inclusions == (True, False, True, False, True)
 
 
 def test_command_line_flag_enables_inclusive_empirical_denominator():
-    args = build_argument_parser().parse_args(["--include-valid-non-option-actions-in-empirical-denominator"])
+    args = build_argument_parser().parse_args(["--include-valid-non-option-actions-in-empirical-denominator", "--condition-pseudo-on-thinking", "--pseudo-score-batch-size", "17"])
 
     assert args.include_valid_non_option_actions_in_empirical_denominator is True
+    assert args.condition_pseudo_on_thinking is True
+    assert args.pseudo_score_batch_size == 17
 
 
 class _PrefixTokenizer:
@@ -159,6 +162,116 @@ def test_artificial_prefix_names_each_group_and_retains_replaceable_token_ids():
         source="artificial_group_thinking",
     )
     assert tokenizer.calls == [(prefix.text, {"add_special_tokens": False})]
+
+
+def test_generated_thinking_prefix_retains_thought_and_appends_group_specific_cue():
+    _, pseudo, _, _ = _group_inputs()
+    tokenizer = _PrefixTokenizer()
+
+    prefix = extract_generated_group_thinking_prefix(
+        SampledAgentResponse("<think>Compare the requested colors. </think><action>click[red]</action>", (1, 2)),
+        pseudo,
+        tokenizer,
+    )
+    malformed = extract_generated_group_thinking_prefix(
+        SampledAgentResponse("No closing thought <action>click[red]</action>", (3, 4)),
+        pseudo,
+        tokenizer,
+    )
+
+    assert prefix.text == "<think>Compare the requested colors.\nThe best choice for the color group corresponds to the label:"
+    assert prefix.source == "generated_thinking"
+    assert prefix.status == "complete_thinking_block"
+    assert malformed.text == "The best choice for the color group corresponds to the label:"
+    assert malformed.status == "no_complete_thinking_block"
+
+
+def test_generated_thinking_scores_are_batched_and_keep_group_alignment(monkeypatch):
+    _, pseudo, scores, _ = _group_inputs()
+    tokenizer = _PrefixTokenizer()
+    completions = (
+        SampledAgentResponse("<think>first</think><action>click[red]</action>", (1,)),
+        SampledAgentResponse("<think>second</think><action>click[blue]</action>", (2,)),
+    )
+    calls = []
+
+    def fake_score(_engine, pseudo_batch, **kwargs):
+        calls.append((tuple(pseudo_batch), kwargs))
+        return [scores] * len(pseudo_batch)
+
+    monkeypatch.setitem(score_generated_thinking_group_pseudo_rollouts.__globals__, "score_product_page_grouped_choice_rollouts", fake_score)
+    score_batches, prefix_batches = score_generated_thinking_group_pseudo_rollouts(
+        object(),
+        tokenizer,
+        [pseudo],
+        {2: completions},
+        max_model_len=100,
+        batch_size=1,
+    )
+
+    assert score_batches == ((scores, scores),)
+    assert len(prefix_batches[0]) == 2
+    assert len(calls) == 2
+    assert all(call[0] == (pseudo,) for call in calls)
+    assert all(call[1]["max_model_len"] == 100 for call in calls)
+    assert calls[0][1]["assistant_response_prefix_token_ids"] == [prefix_batches[0][0].token_ids]
+
+
+def test_generated_thinking_aggregation_uses_empirical_denominator_mask():
+    page, pseudo, first_scores, _ = _group_inputs()
+    second_scores = ProductOptionGroupPseudoRolloutScores(
+        choices=(
+            ActionChoiceScore("A", "click[red]", 0.10, -2.302585, -1.0, -1.0),
+            ActionChoiceScore("B", "click[scarlet]", 0.20, -1.609438, -1.0, -1.0),
+            ActionChoiceScore("C", "click[blue]", 0.70, -0.356675, -1.0, -1.0),
+        ),
+        source_page_index=2,
+        option_group=pseudo.option_group,
+    )
+    empirical = EmpiricalGroupOptionSamples(
+        action_counts=(1, 0, 0),
+        total_completions=2,
+        format_valid_completions=2,
+        recognized_completions=1,
+        recognized_with_invalid_format=0,
+        invalid_format_completions=0,
+        inadmissible_completions=0,
+        invalid_examples=(),
+        projected_actions=("click[red]", "click[large]"),
+        format_valids=(1, 1),
+        probability_denominator=1,
+        denominator_inclusions=(True, False),
+    )
+    prefixes = (
+        GroupResponsePrefix("first", (1,), "generated_thinking", "complete_thinking_block"),
+        GroupResponsePrefix("second", (2,), "generated_thinking", "complete_thinking_block"),
+    )
+
+    included_scores = [score for score, included in zip((first_scores, second_scores), empirical.denominator_inclusions) if included]
+    averaged = average_group_pseudo_rollout_scores(pseudo, included_scores)
+    all_sample_average = average_group_pseudo_rollout_scores(pseudo, (first_scores, second_scores))
+    records = build_generated_thinking_records(pseudo, (first_scores, second_scores), prefixes, empirical)
+    result = build_group_result(
+        page,
+        pseudo,
+        averaged,
+        empirical,
+        real_prompt_tokens=20,
+        bootstrap_replicates=100,
+        seed=3,
+        pseudo_probability_mode="mean_generated_thinking_for_empirical_denominator",
+        all_sample_scores=all_sample_average,
+        conditioned_records=records,
+    )
+
+    assert averaged.correct_probability == pytest.approx(0.75)
+    assert [record["included_in_empirical_denominator"] for record in records] == [True, False]
+    assert records[0]["projected_option_is_correct"] is True
+    assert records[1]["projected_label"] is None
+    assert result["pseudo_correct_probability"] == pytest.approx(0.75)
+    assert result["pseudo_correct_probability_all_samples"] == pytest.approx(0.525)
+    assert result["denominator_conditioned_pseudo_probes"] == 1
+    assert result["complete_thinking_fraction"] == 1.0
 
 
 def test_group_result_retains_multiple_correct_options_and_conditional_rates():

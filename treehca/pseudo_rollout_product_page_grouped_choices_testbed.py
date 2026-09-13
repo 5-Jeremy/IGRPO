@@ -1,10 +1,10 @@
 """Empirically validate product-option-group pseudo-rollout probabilities.
 
 The constrained pseudo distribution for each option group is compared with the
-ordinary product-page policy under a configurable empirical denominator. By
-default it conditions on same-group option selections; an optional mode also
-includes valid non-option actions. Singleton groups are excluded because they
-are not useful calibration cases.
+ordinary product-page policy under a configurable empirical denominator. The
+pseudo probe can use either an artificial cue or thinking sampled from the
+ordinary policy. Singleton groups are excluded because they are not useful
+calibration cases.
 """
 
 import argparse
@@ -32,6 +32,7 @@ from treehca.pseudo_rollout_product_page_choices_testbed import (
     EmpiricalActionSamples,
     RenderedProductPage,
     SampledAgentResponse,
+    average_pseudo_rollout_scores,
     compare_action_distributions,
     load_webshop_products_and_goals,
     project_completions,
@@ -45,11 +46,13 @@ logger = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parents[1]
 _WEBSHOP_ROOT = _ROOT / "agent_system/environments/env_package/webshop/webshop"
+_RESULTS_ROOT = _ROOT / "pseudo_prob_test_results"
 _DEFAULT_CATALOG = _WEBSHOP_ROOT / "data/items_shuffle_1000.json"
 _DEFAULT_ATTRIBUTES = _WEBSHOP_ROOT / "data/items_ins_v2_1000.json"
-_DEFAULT_OUTPUT = _ROOT / "pseudo_rollout_grouped_choice_calibration_report.json"
+_DEFAULT_OUTPUT = _RESULTS_ROOT / "pseudo_rollout_grouped_choice_calibration_report.json"
 _DEFAULT_HIGH_PROBABILITY_THRESHOLD = 0.6
-_ARTIFICIAL_THINKING_TEMPLATE = "<think>The best choice for the {group_name} group corresponds to the label:"
+_GROUP_DECISION_CUE_TEMPLATE = "The best choice for the {group_name} group corresponds to the label:"
+_ARTIFICIAL_THINKING_TEMPLATE = f"<think>{_GROUP_DECISION_CUE_TEMPLATE}"
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,7 @@ class GroupResponsePrefix:
     text: str
     token_ids: tuple[int, ...]
     source: str
+    status: str = "artificial_group_thinking"
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,7 @@ class EmpiricalGroupOptionSamples(EmpiricalActionSamples):
     probability_denominator: int = 0
     included_valid_non_option_completions: int = 0
     different_group_option_completions: int = 0
+    denominator_inclusions: tuple[bool, ...] = ()
 
 
 def _validate_positive_integer(value: int, name: str) -> None:
@@ -132,19 +137,106 @@ def build_artificial_group_response_prefixes(
 ) -> tuple[GroupResponsePrefix, ...]:
     """Tokenize the deterministic thinking cue for every flattened group row.
 
-    Returning explicit response-prefix objects keeps the scorer input compatible
-    with a future strategy that supplies token IDs sampled from the model.
+    Returning explicit response-prefix objects keeps this path aligned with the
+    generated-thinking strategy, which supplies a different prefix per sample.
     """
     prefixes = []
     for pseudo_rollout in pseudo_rollouts:
         prefix_text = _ARTIFICIAL_THINKING_TEMPLATE.format(group_name=pseudo_rollout.option_group.name)
-        token_ids = tokenizer.encode(prefix_text, add_special_tokens=False)
-        if hasattr(token_ids, "tolist"):
-            token_ids = token_ids.tolist()
-        if not isinstance(token_ids, list) or any(isinstance(token_id, bool) or not isinstance(token_id, int) for token_id in token_ids):
-            raise ValueError("Tokenizer must encode each artificial group response prefix as integer token IDs")
-        prefixes.append(GroupResponsePrefix(text=prefix_text, token_ids=tuple(token_ids), source="artificial_group_thinking"))
+        prefixes.append(_encode_group_response_prefix(prefix_text, tokenizer, source="artificial_group_thinking", status="artificial_group_thinking"))
     return tuple(prefixes)
+
+
+def _encode_group_response_prefix(text: str, tokenizer: Any, *, source: str, status: str) -> GroupResponsePrefix:
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    if hasattr(token_ids, "tolist"):
+        token_ids = token_ids.tolist()
+    if not isinstance(token_ids, list) or any(isinstance(token_id, bool) or not isinstance(token_id, int) for token_id in token_ids):
+        raise ValueError("Tokenizer must encode each group response prefix as integer token IDs")
+    return GroupResponsePrefix(text=text, token_ids=tuple(token_ids), source=source, status=status)
+
+
+def extract_generated_group_thinking_prefix(
+    completion: SampledAgentResponse,
+    pseudo_rollout: ProductOptionGroupPseudoRollout,
+    tokenizer: Any,
+) -> GroupResponsePrefix:
+    """Retain sampled thinking and replace its closing suffix with a group cue."""
+    cue = _GROUP_DECISION_CUE_TEMPLATE.format(group_name=pseudo_rollout.option_group.name)
+    think_start = completion.text.find("<think>")
+    think_end = completion.text.find("</think>", think_start + len("<think>")) if think_start >= 0 else -1
+    if think_start < 0 or think_end < 0:
+        prefix_text = cue
+        status = "no_complete_thinking_block"
+    else:
+        # The edit boundary need not coincide with an original sampled token.
+        prefix_text = f"{completion.text[:think_end].rstrip()}\n{cue}"
+        status = "complete_thinking_block"
+    return _encode_group_response_prefix(prefix_text, tokenizer, source="generated_thinking", status=status)
+
+
+def score_generated_thinking_group_pseudo_rollouts(
+    inference_engine: Any,
+    tokenizer: Any,
+    pseudo_rollouts: Sequence[ProductOptionGroupPseudoRollout],
+    completion_batches_by_page: Mapping[int, Sequence[SampledAgentResponse]],
+    *,
+    max_model_len: int,
+    batch_size: int,
+) -> tuple[tuple[tuple[ProductOptionGroupPseudoRolloutScores, ...], ...], tuple[tuple[GroupResponsePrefix, ...], ...]]:
+    """Score every group once per ordinary completion using its sampled thought."""
+    _validate_positive_integer(batch_size, "pseudo_score_batch_size")
+    prefix_batches = []
+    flat_rollouts = []
+    flat_prefixes = []
+    batch_lengths = []
+    for pseudo_rollout in pseudo_rollouts:
+        completions = completion_batches_by_page.get(pseudo_rollout.source_page_index)
+        if completions is None:
+            raise ValueError(f"No completion batch exists for source page {pseudo_rollout.source_page_index}")
+        prefixes = tuple(extract_generated_group_thinking_prefix(completion, pseudo_rollout, tokenizer) for completion in completions)
+        prefix_batches.append(prefixes)
+        batch_lengths.append(len(prefixes))
+        flat_rollouts.extend([pseudo_rollout] * len(prefixes))
+        flat_prefixes.extend(prefix.token_ids for prefix in prefixes)
+
+    flat_scores: list[ProductOptionGroupPseudoRolloutScores] = []
+    for start in range(0, len(flat_rollouts), batch_size):
+        scores = score_product_page_grouped_choice_rollouts(
+            inference_engine,
+            flat_rollouts[start : start + batch_size],
+            max_model_len=max_model_len,
+            assistant_response_prefix_token_ids=flat_prefixes[start : start + batch_size],
+        )
+        if any(score is None for score in scores):
+            raise RuntimeError("A generated-thinking group pseudo-rollout exceeded the validated model context limit")
+        flat_scores.extend(score for score in scores if score is not None)
+
+    score_batches = []
+    offset = 0
+    for length in batch_lengths:
+        next_offset = offset + length
+        score_batches.append(tuple(flat_scores[offset:next_offset]))
+        offset = next_offset
+    if offset != len(flat_scores):
+        raise RuntimeError("Generated-thinking group scores lost rollout alignment")
+    return tuple(score_batches), tuple(prefix_batches)
+
+
+def average_group_pseudo_rollout_scores(
+    pseudo_rollout: ProductOptionGroupPseudoRollout,
+    scores: Sequence[ProductOptionGroupPseudoRolloutScores],
+) -> ProductOptionGroupPseudoRolloutScores:
+    """Average aligned conditioned rows while retaining group metadata."""
+    scores = tuple(scores)
+    if any(score.source_page_index != pseudo_rollout.source_page_index or score.option_group != pseudo_rollout.option_group for score in scores):
+        raise ValueError("Every conditioned score must match the supplied group pseudo-rollout")
+    averaged = average_pseudo_rollout_scores(scores)
+    return ProductOptionGroupPseudoRolloutScores(
+        choices=averaged.choices,
+        source_page_index=pseudo_rollout.source_page_index,
+        option_group=pseudo_rollout.option_group,
+    )
 
 
 def project_group_completions(
@@ -170,6 +262,7 @@ def project_group_completions(
     group_selections_with_invalid_format = 0
     valid_non_option_selections = 0
     different_group_selections = 0
+    denominator_inclusions = []
     for action, format_valid in zip(full_projection.projected_actions, full_projection.format_valids):
         normalized_action = action.lower()
         group_index = group_action_to_index.get(normalized_action)
@@ -177,10 +270,16 @@ def project_group_completions(
             counts[group_index] += 1
             group_selections += 1
             group_selections_with_invalid_format += int(not format_valid)
+            included = True
         elif normalized_action in all_option_action_set:
             different_group_selections += 1
+            included = False
         elif normalized_action in admissible_action_set:
             valid_non_option_selections += 1
+            included = include_valid_non_option_actions_in_denominator
+        else:
+            included = False
+        denominator_inclusions.append(included)
 
     probability_denominator = group_selections
     if include_valid_non_option_actions_in_denominator:
@@ -199,7 +298,40 @@ def project_group_completions(
         probability_denominator=probability_denominator,
         included_valid_non_option_completions=valid_non_option_selections if include_valid_non_option_actions_in_denominator else 0,
         different_group_option_completions=different_group_selections,
+        denominator_inclusions=tuple(denominator_inclusions),
     )
+
+
+def build_generated_thinking_records(
+    pseudo_rollout: ProductOptionGroupPseudoRollout,
+    scores: Sequence[ProductOptionGroupPseudoRolloutScores],
+    prefixes: Sequence[GroupResponsePrefix],
+    empirical: EmpiricalGroupOptionSamples,
+) -> list[dict[str, Any]]:
+    """Serialize conditioned probes without storing sampled chain-of-thought text."""
+    if not len(scores) == len(prefixes) == empirical.total_completions == len(empirical.denominator_inclusions):
+        raise ValueError("Conditioned scores, prefixes, projections, and denominator flags must align")
+    action_to_label = {action.lower(): label for label, action in zip(pseudo_rollout.labels, pseudo_rollout.actions)}
+    correct_labels = set(pseudo_rollout.correct_labels)
+    records = []
+    for sample_index, (score, prefix, projected_action, format_valid, included) in enumerate(zip(scores, prefixes, empirical.projected_actions, empirical.format_valids, empirical.denominator_inclusions)):
+        projected_label = action_to_label.get(projected_action.lower())
+        records.append(
+            {
+                "sample_index": sample_index,
+                "thinking_status": prefix.status,
+                "assistant_prefix_tokens": len(prefix.token_ids),
+                "projected_action": projected_action,
+                "projected_label": projected_label,
+                "projected_option_is_correct": projected_label in correct_labels if projected_label is not None else None,
+                "included_in_empirical_denominator": included,
+                "format_valid": bool(format_valid),
+                "pseudo_entropy_nats": score.entropy,
+                "pseudo_correct_probability": score.correct_probability,
+                "label_probabilities": score.label_probabilities,
+            }
+        )
+    return records
 
 
 def _wilson_interval(successes: int, total: int) -> tuple[float | None, float | None]:
@@ -223,6 +355,9 @@ def build_group_result(
     bootstrap_replicates: int,
     seed: int,
     response_prefix: GroupResponsePrefix | None = None,
+    pseudo_probability_mode: str = "artificial_group_thinking_prefix",
+    all_sample_scores: ProductOptionGroupPseudoRolloutScores | None = None,
+    conditioned_records: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build one serializable group-level pseudo/empirical comparison."""
     if pseudo_rollout.option_group != scores.option_group or pseudo_rollout.source_page_index != scores.source_page_index:
@@ -238,6 +373,7 @@ def build_group_result(
     )
     conditional_total = empirical.probability_denominator
     correct_options = set(pseudo_rollout.option_group.correct_options)
+    all_sample_probabilities = None if all_sample_scores is None else all_sample_scores.label_probabilities
     option_rows = []
     for option, choice, count in zip(pseudo_rollout.option_group.values, scores.choices, empirical.action_counts):
         lower, upper = _wilson_interval(count, conditional_total)
@@ -248,6 +384,7 @@ def build_group_result(
                 "action": choice.action,
                 "is_correct": option in correct_options,
                 "pseudo_probability": choice.probability,
+                **({"pseudo_probability_all_samples": all_sample_probabilities[choice.label]} if all_sample_probabilities is not None else {}),
                 "empirical_count": count,
                 "empirical_probability_conditional": count / conditional_total if conditional_total else None,
                 "empirical_wilson_95_interval": [lower, upper],
@@ -267,7 +404,9 @@ def build_group_result(
         "real_prompt_tokens": real_prompt_tokens,
         "pseudo_prompt_tokens": len(pseudo_rollout.prompt_token_ids),
         "pseudo_entropy_nats": scores.entropy,
+        "pseudo_probability_mode": pseudo_probability_mode,
         "pseudo_correct_probability": scores.correct_probability,
+        **({"pseudo_correct_probability_all_samples": all_sample_scores.correct_probability} if all_sample_scores is not None else {}),
         "empirical_correct_probability_conditional": empirical_correct_count / conditional_total if conditional_total else None,
         "monte_carlo": {
             "total_page_completions": total_completions,
@@ -292,6 +431,10 @@ def build_group_result(
             "text": response_prefix.text,
             "token_count": len(response_prefix.token_ids),
         }
+    if conditioned_records is not None:
+        result["conditioned_pseudo_rollouts"] = list(conditioned_records)
+        result["complete_thinking_fraction"] = sum(record["thinking_status"] == "complete_thinking_block" for record in conditioned_records) / len(conditioned_records) if conditioned_records else None
+        result["denominator_conditioned_pseudo_probes"] = sum(record["included_in_empirical_denominator"] for record in conditioned_records)
     return result
 
 
@@ -338,6 +481,7 @@ def format_markdown_summary(report: dict[str, Any]) -> str:
         return "n/a" if value is None else f"{value:.2%}" if isinstance(value, float) else str(value)
 
     threshold = summary["high_probability_threshold"]
+    pseudo_mode = config.get("pseudo_probability_mode", "artificial_group_thinking_prefix")
     inclusive_denominator = bool(config.get("include_valid_non_option_actions_in_empirical_denominator", False))
     lines = [
         "# Grouped-choice pseudo-probability testbed",
@@ -346,7 +490,8 @@ def format_markdown_summary(report: dict[str, Any]) -> str:
         f"Pages: `{summary['pages_evaluated']}` of `{summary['pages_requested']}` requested  ",
         f"Multi-option groups: `{summary['groups_evaluated']}`  ",
         f"Ordinary completions per page: `{config['samples_per_page']}`  ",
-        f"High-probability threshold: `>{threshold:g}`",
+        f"High-probability threshold: `>{threshold:g}`  ",
+        f"Pseudo probability mode: `{pseudo_mode}`  ",
         f"Empirical denominator: `{'same-group options plus valid non-option actions' if inclusive_denominator else 'same-group options only'}`",
         "",
         "## Aggregate correct-option results",
@@ -387,7 +532,7 @@ def _engine_model_limit(inference_engine: Any) -> int:
 
 
 def _validate_run_arguments(args: argparse.Namespace) -> None:
-    for name in ("num_pages", "samples_per_page", "bootstrap_replicates", "max_new_tokens", "page_batch_size", "tensor_parallel_size"):
+    for name in ("num_pages", "samples_per_page", "bootstrap_replicates", "max_new_tokens", "page_batch_size", "pseudo_score_batch_size", "tensor_parallel_size"):
         _validate_positive_integer(getattr(args, name), name)
     if args.max_model_len is not None:
         _validate_positive_integer(args.max_model_len, "max_model_len")
@@ -431,7 +576,7 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
     pseudo_rollouts = tuple(pseudo for pseudo in all_group_rollouts if len(pseudo.option_group.values) >= 2)
     if not pseudo_rollouts:
         raise ValueError("No sampled page produced a multi-option group")
-    response_prefixes = build_artificial_group_response_prefixes(pseudo_rollouts, tokenizer)
+    artificial_response_prefixes = build_artificial_group_response_prefixes(pseudo_rollouts, tokenizer)
     real_prompt_ids = tokenize_real_prompts(pages, tokenizer)
     required_logprobs = required_max_logprobs(pseudo_rollouts)
 
@@ -452,7 +597,11 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
     model_limit = _engine_model_limit(inference_engine)
 
     real_eligible_pages = {index for index, token_ids in enumerate(real_prompt_ids) if len(token_ids) + args.max_new_tokens <= model_limit}
-    eligible_pairs = tuple((pseudo, response_prefix) for pseudo, response_prefix in zip(pseudo_rollouts, response_prefixes) if pseudo.source_page_index in real_eligible_pages and len(pseudo.prompt_token_ids) + len(response_prefix.token_ids) + 1 <= model_limit)
+    eligible_pairs = tuple(
+        (pseudo, response_prefix)
+        for pseudo, response_prefix in zip(pseudo_rollouts, artificial_response_prefixes)
+        if pseudo.source_page_index in real_eligible_pages and len(pseudo.prompt_token_ids) + (args.max_new_tokens + len(response_prefix.token_ids) if args.condition_pseudo_on_thinking else len(response_prefix.token_ids)) + 1 <= model_limit
+    )
     eligible_rollouts = tuple(pseudo for pseudo, _ in eligible_pairs)
     eligible_response_prefixes = tuple(response_prefix for _, response_prefix in eligible_pairs)
     eligible_page_indices = sorted({pseudo.source_page_index for pseudo in eligible_rollouts})
@@ -462,7 +611,7 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
             "source_page_index": pseudo.source_page_index,
             "asin": pages[pseudo.source_page_index].asin,
             "group_name": pseudo.option_group.name,
-            "reason": "real prompt or response-prefixed pseudo prompt exceeds the model context limit",
+            "reason": ("real prompt or worst-case generated-thinking pseudo prompt exceeds the model context limit" if args.condition_pseudo_on_thinking else "real prompt or response-prefixed pseudo prompt exceeds the model context limit"),
         }
         for pseudo in pseudo_rollouts
         if id(pseudo) not in eligible_rollout_ids
@@ -470,15 +619,17 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
     if not eligible_rollouts:
         raise ValueError(f"No multi-option group fits max_model_len={model_limit} with max_new_tokens={args.max_new_tokens}")
 
-    logger.info("Scoring %d group-specific pseudo-rollout prompts", len(eligible_rollouts))
-    pseudo_scores = score_product_page_grouped_choice_rollouts(
-        inference_engine,
-        eligible_rollouts,
-        max_model_len=model_limit,
-        assistant_response_prefix_token_ids=[response_prefix.token_ids for response_prefix in eligible_response_prefixes],
-    )
-    if any(score is None for score in pseudo_scores):
-        raise RuntimeError("An eligible group pseudo-rollout unexpectedly produced no score")
+    pseudo_scores = None
+    if not args.condition_pseudo_on_thinking:
+        logger.info("Scoring %d group-specific pseudo-rollout prompts", len(eligible_rollouts))
+        pseudo_scores = score_product_page_grouped_choice_rollouts(
+            inference_engine,
+            eligible_rollouts,
+            max_model_len=model_limit,
+            assistant_response_prefix_token_ids=[response_prefix.token_ids for response_prefix in eligible_response_prefixes],
+        )
+        if any(score is None for score in pseudo_scores):
+            raise RuntimeError("An eligible group pseudo-rollout unexpectedly produced no score")
 
     eligible_real_ids = tuple(real_prompt_ids[index] for index in eligible_page_indices)
     logger.info("Sampling %d ordinary completions for each of %d pages", args.samples_per_page, len(eligible_page_indices))
@@ -494,9 +645,22 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
     )
     completions_by_page = dict(zip(eligible_page_indices, completion_batches))
 
+    conditioned_score_batches = None
+    generated_prefix_batches = None
+    if args.condition_pseudo_on_thinking:
+        total_probes = len(eligible_rollouts) * args.samples_per_page
+        logger.info("Scoring %d group pseudo-rollouts conditioned on sampled thinking", total_probes)
+        conditioned_score_batches, generated_prefix_batches = score_generated_thinking_group_pseudo_rollouts(
+            inference_engine,
+            tokenizer,
+            eligible_rollouts,
+            completions_by_page,
+            max_model_len=model_limit,
+            batch_size=args.pseudo_score_batch_size,
+        )
+
     group_results = []
-    for group_index, (pseudo, score, response_prefix) in enumerate(zip(eligible_rollouts, pseudo_scores, eligible_response_prefixes)):
-        assert score is not None
+    for group_index, pseudo in enumerate(eligible_rollouts):
         page_index = pseudo.source_page_index
         empirical = project_group_completions(
             completions_by_page[page_index],
@@ -505,6 +669,24 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
             all_option_actions_by_page[page_index],
             include_valid_non_option_actions_in_denominator=args.include_valid_non_option_actions_in_empirical_denominator,
         )
+        result_kwargs = {}
+        if args.condition_pseudo_on_thinking:
+            assert conditioned_score_batches is not None and generated_prefix_batches is not None
+            sample_scores = conditioned_score_batches[group_index]
+            denominator_scores = [score for score, included in zip(sample_scores, empirical.denominator_inclusions) if included]
+            score = average_group_pseudo_rollout_scores(pseudo, denominator_scores or sample_scores)
+            all_sample_score = average_group_pseudo_rollout_scores(pseudo, sample_scores)
+            conditioned_records = build_generated_thinking_records(pseudo, sample_scores, generated_prefix_batches[group_index], empirical)
+            result_kwargs = {
+                "pseudo_probability_mode": "mean_generated_thinking_for_empirical_denominator",
+                "all_sample_scores": all_sample_score,
+                "conditioned_records": conditioned_records,
+            }
+        else:
+            assert pseudo_scores is not None
+            score = pseudo_scores[group_index]
+            assert score is not None
+            result_kwargs = {"response_prefix": eligible_response_prefixes[group_index]}
         group_results.append(
             build_group_result(
                 pages[page_index],
@@ -514,7 +696,7 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
                 real_prompt_tokens=len(real_prompt_ids[page_index]),
                 bootstrap_replicates=args.bootstrap_replicates,
                 seed=args.seed + 100_000 + group_index,
-                response_prefix=response_prefix,
+                **result_kwargs,
             )
         )
 
@@ -538,7 +720,9 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
             "tensor_parallel_size": args.tensor_parallel_size,
             "dtype": args.dtype,
             "required_max_logprobs": required_logprobs,
-            "pseudo_probability_mode": "artificial_group_thinking_prefix",
+            "pseudo_probability_mode": ("mean_generated_thinking_for_empirical_denominator" if args.condition_pseudo_on_thinking else "artificial_group_thinking_prefix"),
+            "condition_pseudo_on_thinking": args.condition_pseudo_on_thinking,
+            "pseudo_score_batch_size": args.pseudo_score_batch_size,
             "artificial_thinking_template": _ARTIFICIAL_THINKING_TEMPLATE,
             "high_probability_threshold": args.high_probability_threshold,
             "include_valid_non_option_actions_in_empirical_denominator": args.include_valid_non_option_actions_in_empirical_denominator,
@@ -581,6 +765,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--max-model-len", type=int, help="Optional vLLM model context limit")
     parser.add_argument("--page-batch-size", type=int, default=8, help="Number of ordinary prompts submitted per vLLM call")
+    parser.add_argument("--pseudo-score-batch-size", type=int, default=1024, help="Generated-thinking group pseudo prompts submitted per vLLM call")
+    parser.add_argument(
+        "--condition-pseudo-on-thinking",
+        action="store_true",
+        help="Score each group after the thinking sampled in every ordinary completion instead of using the artificial thinking prefix",
+    )
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.8)
     parser.add_argument("--dtype", default="auto")

@@ -23,9 +23,10 @@ logger = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parents[1]
 _WEBSHOP_ROOT = _ROOT / "agent_system/environments/env_package/webshop/webshop"
+_RESULTS_ROOT = _ROOT / "pseudo_prob_test_results"
 _DEFAULT_CATALOG = _WEBSHOP_ROOT / "data/items_shuffle_1000.json"
 _DEFAULT_ATTRIBUTES = _WEBSHOP_ROOT / "data/items_ins_v2_1000.json"
-_DEFAULT_OUTPUT = _ROOT / "pseudo_rollout_calibration_report.json"
+_DEFAULT_OUTPUT = _RESULTS_ROOT / "pseudo_rollout_calibration_report.json"
 _THINKING_DECISION_CUE = "The best next action is:"
 
 
