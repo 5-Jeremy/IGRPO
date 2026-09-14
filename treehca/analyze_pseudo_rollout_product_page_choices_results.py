@@ -48,6 +48,71 @@ def _label_sort_key(label: str) -> tuple[int, int | str]:
     return (1, label)
 
 
+_CONFIDENCE_THRESHOLDS: tuple[float | None, ...] = (None, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+
+
+def _analyze_conditioned_rollouts(page: dict[str, Any], asin: str) -> dict[str, Any] | None:
+    """Compute sampled-vs-pseudo-top agreement within one page."""
+    records = page.get("conditioned_pseudo_rollouts")
+    if records is None:
+        return None
+    if not isinstance(records, list):
+        raise ValueError(f"Page {asin!r} conditioned_pseudo_rollouts must be a list")
+
+    valid_rollouts: list[tuple[float, bool]] = []
+    for rollout_index, rollout in enumerate(records):
+        if not isinstance(rollout, dict):
+            raise ValueError(f"Page {asin!r} conditioned rollout {rollout_index} must be an object")
+        format_valid = rollout.get("format_valid")
+        if not isinstance(format_valid, bool):
+            raise ValueError(f"Page {asin!r} conditioned rollout {rollout_index} has an invalid format_valid value")
+        projected_label = rollout.get("projected_label")
+        if not format_valid or projected_label is None:
+            continue
+        if not isinstance(projected_label, str) or not projected_label:
+            raise ValueError(f"Page {asin!r} conditioned rollout {rollout_index} has an invalid projected_label")
+        label_probabilities = rollout.get("label_probabilities")
+        if not isinstance(label_probabilities, dict) or not label_probabilities:
+            raise ValueError(f"Page {asin!r} conditioned rollout {rollout_index} has invalid label_probabilities")
+        if projected_label not in label_probabilities:
+            raise ValueError(
+                f"Page {asin!r} conditioned rollout {rollout_index} projected label {projected_label!r} "
+                "is absent from label_probabilities"
+            )
+        probabilities = {
+            str(label): _finite_probability(
+                probability,
+                f"page {asin} conditioned rollout {rollout_index} label {label} probability",
+            )
+            for label, probability in label_probabilities.items()
+        }
+        if not math.isclose(sum(probabilities.values()), 1.0, rel_tol=1e-6, abs_tol=1e-6):
+            raise ValueError(
+                f"Conditioned probabilities for page {asin!r} rollout {rollout_index} "
+                f"sum to {sum(probabilities.values()):.12g}, not 1"
+            )
+        maximum_probability = max(probabilities.values())
+        tolerance = max(1e-12, abs(maximum_probability) * 1e-12)
+        sampled_action_is_top = math.isclose(
+            probabilities[projected_label], maximum_probability, rel_tol=0.0, abs_tol=tolerance
+        )
+        valid_rollouts.append((maximum_probability, sampled_action_is_top))
+
+    threshold_results = []
+    for threshold in _CONFIDENCE_THRESHOLDS:
+        eligible = [match for maximum, match in valid_rollouts if threshold is None or maximum > threshold]
+        matches = sum(eligible)
+        threshold_results.append(
+            {
+                "minimum_top_probability_exclusive": threshold,
+                "eligible_rollouts": len(eligible),
+                "matching_rollouts": matches,
+                "match_fraction": matches / len(eligible) if eligible else None,
+            }
+        )
+    return {"valid_rollouts": len(valid_rollouts), "thresholds": threshold_results}
+
+
 def analyze_report(report: dict[str, Any]) -> dict[str, Any]:
     """Extract plot records and top-action agreement from a testbed report."""
     pages = report.get("pages")
@@ -57,6 +122,7 @@ def analyze_report(report: dict[str, Any]) -> dict[str, Any]:
     action_points: list[dict[str, Any]] = []
     page_points: list[dict[str, Any]] = []
     excluded_pages: list[dict[str, str]] = []
+    conditioned_page_results: list[dict[str, Any]] = []
     matching_pages = 0
 
     for page_index, page in enumerate(pages):
@@ -105,6 +171,9 @@ def analyze_report(report: dict[str, Any]) -> dict[str, Any]:
 
         pseudo_entropy = _entropy(pseudo_probabilities)
         empirical_entropy = _entropy(empirical_probabilities)
+        conditioned_result = _analyze_conditioned_rollouts(page, asin)
+        if conditioned_result is not None:
+            conditioned_page_results.append({"asin": asin, **conditioned_result})
         page_points.append(
             {
                 "asin": asin,
@@ -113,6 +182,7 @@ def analyze_report(report: dict[str, Any]) -> dict[str, Any]:
                 "pseudo_top_labels": pseudo_top_labels,
                 "empirical_top_labels": empirical_top_labels,
                 "top_action_matches": top_action_matches,
+                "conditioned_rollout_top_action_agreement": conditioned_result,
             }
         )
         for action, label, pseudo_probability, empirical_probability in zip(actions, labels, pseudo_probabilities, empirical_probabilities, strict=True):
@@ -125,6 +195,22 @@ def analyze_report(report: dict[str, Any]) -> dict[str, Any]:
                     "empirical_probability": empirical_probability,
                 }
             )
+
+    aggregate_conditioned_thresholds = []
+    for threshold_index, threshold in enumerate(_CONFIDENCE_THRESHOLDS):
+        page_thresholds = [page["thresholds"][threshold_index] for page in conditioned_page_results]
+        included = [result for result in page_thresholds if result["match_fraction"] is not None]
+        aggregate_conditioned_thresholds.append(
+            {
+                "minimum_top_probability_exclusive": threshold,
+                "pages_included": len(included),
+                "eligible_rollouts": sum(result["eligible_rollouts"] for result in included),
+                "matching_rollouts": sum(result["matching_rollouts"] for result in included),
+                "mean_page_match_fraction": (
+                    sum(result["match_fraction"] for result in included) / len(included) if included else None
+                ),
+            }
+        )
 
     evaluated_pages = len(page_points)
     return {
@@ -139,6 +225,15 @@ def analyze_report(report: dict[str, Any]) -> dict[str, Any]:
             "evaluated_pages": evaluated_pages,
             "fraction": matching_pages / evaluated_pages if evaluated_pages else None,
             "tie_rule": "A match occurs when the pseudo and empirical sets of maximum-probability labels overlap.",
+        },
+        "conditioned_rollout_top_action_agreement": {
+            "pages_with_conditioned_rollouts": len(conditioned_page_results),
+            "valid_rollout_definition": "The rollout is format-valid and projects to a recognized admissible action label.",
+            "confidence_definition": "The largest action probability in the rollout's thinking-conditioned pseudo-distribution.",
+            "threshold_rule": "For threshold t, include a valid rollout only when its top pseudo-probability is strictly greater than t.",
+            "averaging_rule": "Compute the match fraction within each eligible page, then take the unweighted mean across pages.",
+            "tie_rule": "The sampled action matches when its probability ties for the maximum within numerical tolerance.",
+            "thresholds": aggregate_conditioned_thresholds,
         },
     }
 
@@ -224,6 +319,7 @@ def _summary_without_plot_records(analysis: dict[str, Any], input_path: Path, pl
         "pages_excluded": analysis["pages_excluded"],
         "excluded_pages": analysis["excluded_pages"],
         "top_action_agreement": analysis["top_action_agreement"],
+        "conditioned_rollout_top_action_agreement": analysis["conditioned_rollout_top_action_agreement"],
         "plots": plot_paths,
         "page_results": analysis["page_points"],
     }
@@ -237,6 +333,7 @@ def write_summaries(summary: dict[str, Any], output_dir: Path) -> tuple[Path, Pa
     agreement = summary["top_action_agreement"]
     fraction = agreement["fraction"]
     fraction_text = "not available" if fraction is None else f"{fraction:.2%}"
+    conditioned_agreement = summary.get("conditioned_rollout_top_action_agreement")
     lines = [
         "# Pseudo-rollout probability analysis",
         "",
@@ -247,14 +344,38 @@ def write_summaries(summary: dict[str, Any], output_dir: Path) -> tuple[Path, Pa
         f"- Top-action agreement: **{fraction_text}** ({agreement['matching_pages']}/{agreement['evaluated_pages']})",
         f"- Tie handling: {agreement['tie_rule']}",
         "",
-        "## Plots",
-        "",
-        f"- Probability scatter, colored by action label: `{summary['plots']['probability_scatter']}`",
-        f"- Entropy scatter: `{summary['plots']['entropy_scatter']}`",
-        "",
-        "Entropies use natural logarithms and are reported in nats. Empirical probabilities are conditional on the model producing a recognized admissible action.",
-        "",
     ]
+    if conditioned_agreement is not None:
+        lines.extend(
+            [
+                "## Per-rollout sampled-action agreement",
+                "",
+                "Each row is the unweighted mean of per-page match fractions. A rollout is included only if it is format-valid and projects to a recognized admissible action.",
+                "",
+                "| Minimum top pseudo-probability | Pages | Valid rollouts | Mean page match rate |",
+                "| --- | ---: | ---: | ---: |",
+            ]
+        )
+        for result in conditioned_agreement["thresholds"]:
+            threshold = result["minimum_top_probability_exclusive"]
+            threshold_text = "All" if threshold is None else f"> {threshold:.1f}"
+            mean_fraction = result["mean_page_match_fraction"]
+            mean_text = "not available" if mean_fraction is None else f"{mean_fraction:.2%}"
+            lines.append(
+                f"| {threshold_text} | {result['pages_included']} | {result['eligible_rollouts']} | {mean_text} |"
+            )
+        lines.extend(["", f"Tie handling: {conditioned_agreement['tie_rule']}", ""])
+    lines.extend(
+        [
+            "## Plots",
+            "",
+            f"- Probability scatter, colored by action label: `{summary['plots']['probability_scatter']}`",
+            f"- Entropy scatter: `{summary['plots']['entropy_scatter']}`",
+            "",
+            "Entropies use natural logarithms and are reported in nats. Empirical probabilities are conditional on the model producing a recognized admissible action.",
+            "",
+        ]
+    )
     markdown_path.write_text("\n".join(lines))
     return json_path, markdown_path
 
@@ -282,6 +403,14 @@ def main() -> None:
     fraction = agreement["fraction"]
     agreement_text = "not available" if fraction is None else f"{fraction:.2%} ({agreement['matching_pages']}/{agreement['evaluated_pages']})"
     print(f"Top-action agreement: {agreement_text}")
+    conditioned = analysis["conditioned_rollout_top_action_agreement"]
+    all_valid = conditioned["thresholds"][0]
+    conditioned_text = (
+        "not available"
+        if all_valid["mean_page_match_fraction"] is None
+        else f"{all_valid['mean_page_match_fraction']:.2%} across {all_valid['pages_included']} pages"
+    )
+    print(f"Per-rollout sampled-action agreement (all valid): {conditioned_text}")
     print(f"Probability plot: {plot_paths['probability_scatter']}")
     print(f"Entropy plot: {plot_paths['entropy_scatter']}")
     print(f"JSON summary: {json_path}")
