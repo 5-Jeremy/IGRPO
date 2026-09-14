@@ -5,6 +5,11 @@ checks whether the probabilities produced by the group-specific pseudo-rollout
 scorer agree with empirical choices made by the ordinary product-page policy.
 It is the option-group counterpart to the existing full-action testbed.
 
+For actual multi-step purchases from a fixed, history-bearing product page, use
+the [continuation outcome testbed](pseudo_rollout_product_page_outcomes_testbed.md).
+It compares joint correct-option pseudo estimates with native WebShop outcomes
+over up to 13 additional actions.
+
 ## Experiment
 
 The testbed uses only synthetic WebShop goals (`human_goals=False`). It samples
