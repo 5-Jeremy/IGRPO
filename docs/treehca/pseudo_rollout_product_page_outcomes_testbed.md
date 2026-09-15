@@ -7,9 +7,9 @@ product page. Independent environments continue from it for **at most 13
 additional actions**. Their purchases receive the native environment's reward.
 
 `--count_partial_reward` changes the headline comparison to purchases with
-**positive native reward**, including both full and partial credit. Expected raw
-rewards are reported in both modes, using empirical trajectories and the native
-rewards of independently weighted pseudo option combinations.
+**positive native reward**, including both full and partial credit. Expected rewards use training-style binary credit (0 or 1) by default and native
+fractional credit only with the flag, for both empirical trajectories and
+independently weighted pseudo option combinations.
 
 The existing [grouped-choice testbed](pseudo_rollout_product_page_grouped_choices_testbed.md)
 measures the distribution of actions on one turn. This testbed instead measures
@@ -173,8 +173,8 @@ with `extract_product_page_contexts`. The exact goal option mapping is passed to
 `prepare_product_page_grouped_choice_rollouts`.
 
 For each displayed option group, that helper preserves the task, product-page
-observation, and history. It replaces the admissible-action list with labeled
-choices for this group and replaces the final instructions with the group's
+observation, and history. It replaces the action description with `Your available options for {group_name} are:`
+and the admissible-action list with labeled choices for this group and replaces the final instructions with the group's
 choice instructions. Correct-option metadata is used to evaluate the output;
 it is not an extra answer hint added to the prompt.
 
@@ -190,7 +190,9 @@ label token and its leading-space variant, combines their mass, and normalizes
 over allowed labels. The probe uses temperature 1, as implemented by the scorer.
 Changing ordinary rollout sampling settings does not change the pseudo probe.
 
-For group `g`, sum all fuzzy-correct labels' probabilities:
+For group `g`, sum all correct labels' probabilities, including the final `none`
+label when leaving that group unselected can still satisfy the native option
+requirements (see [omission correctness](pseudo_rollout_prompts.md#group-specific-option-prompts)):
 
 ```text
 q_g = sum of pseudo probabilities of correct options in group g
@@ -198,13 +200,14 @@ q_all = product of q_g over every displayed option group
 ```
 
 Unlike the next-action grouped testbed, **singleton groups are retained**. Their
-pseudo correct mass is normally 1, while a real agent can still fail to select
-them before buying. Every starting group must produce a score; context overflow
+single real option now competes with `none`, so their pseudo correct mass need
+not be 1. This models failure to select a required singleton before buying. Every starting group must produce a score; context overflow
 or missing scores stop the run instead of computing a product over an
 incomplete set of groups. No later page is pseudo-scored during a continuation.
 
-Without `--count_partial_reward`, `q_all` is the headline
-**independence-based estimate of choosing all correct options**.
+`q_all` is retained as a diagnostic **independence-based estimate of choosing
+all group-correct options**. The default headline instead uses the exact native
+full-reward probability over option combinations (section 6).
 For example, masses 0.8, 0.9, and 1 imply 0.72. It is not a learned joint
 probability, and the probes do not model action ordering, revisions, stopping,
 subpage visits, or whether a purchase occurs. In partial-credit mode, the
@@ -313,8 +316,8 @@ purchases. The report includes:
 | `full_reward_purchase_rate` | `F / N` |
 | `full_reward_given_purchase_rate` | `F / B`, or null if there are no purchases |
 | `pseudo_all_correct_probability` | `q_all` from the starting page |
-| `pseudo_minus_full_reward_purchase_rate` | `q_all - F/N` |
-| `pseudo_minus_full_reward_given_purchase_rate` | `q_all - F/B`, or null |
+| `pseudo_minus_full_reward_purchase_rate` | `q_native_full - F/N` |
+| `pseudo_minus_full_reward_given_purchase_rate` | `q_native_full - F/B`, or null |
 
 The no-purchase, partial-purchase, and full-purchase rates partition all samples
 and sum to one. The report includes
@@ -352,9 +355,9 @@ the selected mode are:
 | `reward_purchase_count` | `F` | `P` |
 | `reward_purchase_rate` | `F/N` | `P/N` |
 | `reward_given_purchase_rate` | `F/B` | `P/B` |
-| `pseudo_reward_probability` | `q_all` | `q_positive` defined below |
-| `pseudo_minus_reward_purchase_rate` | `q_all - F/N` | `q_positive - P/N` |
-| `pseudo_minus_reward_given_purchase_rate` | `q_all - F/B` | `q_positive - P/B` |
+| `pseudo_reward_probability` | `q_native_full` | `q_positive` defined below |
+| `pseudo_minus_reward_purchase_rate` | `q_native_full - F/N` | `q_positive - P/N` |
+| `pseudo_minus_reward_given_purchase_rate` | `q_native_full - F/B` | `q_positive - P/B` |
 
 The empirical rates have Wilson 95% intervals in the corresponding
 `*_wilson_95` fields. Purchase-conditioned rates and gaps are null when `B=0`.
@@ -371,19 +374,24 @@ including zero-reward purchases, as in the original report.
 ### Native reward distribution from the pseudo probabilities
 
 `compute_pseudo_rewards` enumerates the Cartesian product of the option groups:
-one displayed option per group, including singleton groups. For combination
+one displayed option **or `none`** per group, including singleton groups. For combination
 `c = (o_1, ..., o_G)`, its independent pseudo probability is:
 
 ```text
 w(c) = product over groups g of p_g(o_g)
-R(c) = native WebShop get_reward(product, exact_goal, price, options=c)
+R(c) = native WebShop get_reward(product, exact_goal, price,
+                                options={g: o_g for g in groups if o_g is not none})
 q_positive = sum over combinations c with R(c) > 0 of w(c)
 q_native_full = sum over combinations c with R(c) = 1 of w(c)
 ```
 
 The native function is the same one invoked by `SimServer.done`, with the same
 fixed product, goal, price, and lowercased option selections as an actual
-purchase. It includes type, attributes, price, and the environment's set-wise
+purchase. A `none` selection removes that group's key entirely; it does not
+insert a `"none"` string, select a default, or execute a click. The all-`none`
+combination buys with an empty option dictionary. Thus partial rewards for
+missing required options and full rewards for genuinely optional omissions are
+both evaluated by the environment itself. It includes type, attributes, price, and the environment's set-wise
 fuzzy option matching. This is not an approximation based on the fraction of
 groups labeled correct. Native full-credit probability can differ from the
 original product of group-correct masses; both are retained for diagnosis.
@@ -394,15 +402,25 @@ into `page.pseudo_rewards.reward_distribution`, a list of native reward values,
 probability masses, and counts of contributing combinations. A final mass
 normalization removes floating-point roundoff. `combination_count`,
 `full_reward_probability`, and `positive_reward_probability` are also stored.
-Enumeration is exact and requires `product_g |options_g|` native reward calls
+Enumeration is exact and requires `product_g (|catalog_options_g| + 1)` native reward calls
 per page, in addition to model inference. It does not step or mutate the rollout
 environments. This cost grows with the number of option combinations.
 
-There is no synthetic "do not select this group" choice, exit choice, or purchase
-choice added to the pseudo distribution. The pseudo experiment assumes one
-selection per group followed by purchase. The empirical trajectories may omit
-groups, revise selections, or never buy; these differences remain part of the
-comparison.
+Every group distribution includes the synthetic `none` choice, but no exit or
+purchase decision. The pseudo experiment assumes at most one selected option
+per group followed by purchase. It now models omitted groups directly. The
+empirical trajectories may revise selections or never buy; those differences
+remain part of the comparison. The real starting sessions have no selected
+options, and the native environment retains each selected group until purchase
+or an intercepted exit, so missing keys in the saved final option dictionaries
+identify groups never selected in those trajectories. No empirical action is
+replaced by the pseudo sentinel.
+
+Group report rows retain `none_is_correct`, and each choice has `is_none` to
+distinguish the sentinel from a literal `click[none]`. The pseudo reward histogram
+and expected rewards include its mass without renormalizing it away. Legacy
+manually constructed distributions without the sentinel remain accepted by the
+integration helper; newly prepared probes always include it.
 
 Because setup verifies a product that satisfies the query, its attribute and
 price credit can make **every** option combination earn positive reward. Then
@@ -412,21 +430,32 @@ partial credit is a binary event (`R>0`), not weighting an event by its reward.
 
 ### Expected rewards
 
-Expected **raw** rewards are calculated in both modes, always including
-fractional credit. They are on WebShop's native 0–1 scale, not the training
-worker's sparse 0-or-10 reward scale. For trajectory `i`, define `r_i` as its
-actual purchase reward, or zero if it never purchases:
+Expected rewards follow the selected mode. **Without the flag**, convert native
+reward `R` to `b(R) = 1 if R == 1.0 else 0`, exactly the training worker's
+binary success rule, scaled from 10 to 1. Partial purchases and zero-reward
+purchases contribute zero. This applies to both empirical and pseudo expected
+rewards. The default expectations therefore equal full-reward probabilities:
+`F/N`, `F/B`, and `q_native_full`.
+
+**With the flag**, use native fractional purchase reward `R` directly. In both
+modes a non-purchase contributes zero. Let `r_i` and `r(c)` denote these
+mode-dependent rewards for empirical trajectory `i` and pseudo combination `c`:
 
 ```text
 empirical_expected_reward_all = sum_i r_i / N
 empirical_expected_reward_given_purchase = sum_i r_i / B
-pseudo_expected_reward = sum_c w(c) * R(c)
+pseudo_expected_reward = sum_c w(c) * r(c)
 ```
 
 The empirical means equivalently sum each observed reward multiplied by its
-empirical frequency, with denominators `N` and `B` respectively. The pseudo mean
-weights every combination's native reward by its pseudo probability, including
-zero and partial rewards. It is also stored as `page.pseudo_rewards.expected_reward`.
+empirical frequency, with denominators `N` and `B` respectively. The pseudo mean weights each combination's mode-dependent reward by its
+pseudo probability. Raw native receipts and `page.pseudo_rewards.reward_distribution`
+remain diagnostic data in either mode. `page.pseudo_rewards.expected_reward`
+is explicitly the raw native mean; the headline `outcomes.pseudo_expected_reward`
+uses that mean only with the flag and uses `pseudo_rewards.full_reward_probability`
+otherwise. `outcomes.reward_scale` records `training_binary_0_1` or
+`native_fractional`. Raw diagnostics never contribute partial credit to the
+default correctness rates or expected rewards.
 The report includes `pseudo_minus_expected_reward_all` and
 `pseudo_minus_expected_reward_given_purchase`, and a second Markdown table
 displays all three expected rewards and the two signed gaps. With no purchases,
@@ -436,15 +465,17 @@ intervals describe the binary rates, not the expected-reward estimates.
 
 For example, suppose four trajectories produce rewards `1`, `0.5`, `0` on
 purchases and `0` on an exit. Then `F/N=1/4`, `P/N=2/4`, `F/B=1/3`, `P/B=2/3`,
-and the empirical expected rewards are `1.5/4=0.375` and `1.5/3=0.5`. If two
+and, with the flag, the empirical expected rewards are `1.5/4=0.375` and `1.5/3=0.5`. If two
 pseudo groups assign probabilities `(0.6, 0.4)` and `(0.7, 0.3)`, their four
 combination masses are `0.42`, `0.18`, `0.28`, `0.12`. For illustrative native
 rewards `1`, `0.5`, `0.25`, `0` on these combinations, `q_positive=0.88` and
 `E_pseudo[R]=0.42 + 0.18*0.5 + 0.28*0.25 = 0.58`. The expected-reward gaps are
-`0.58-0.375=0.205` and `0.58-0.5=0.08`.
+`0.58-0.375=0.205` and `0.58-0.5=0.08` with the flag. Without it, the empirical
+expectations are `1/4` and `1/3`, and the pseudo expectation is `0.42`;
+all fractional rewards have been mapped to zero.
 
-The pseudo expectation is conditional on the hypothetical purchase of a complete
-option combination. Its comparison with the all-rollout empirical mean includes
+The pseudo expectation is conditional on the hypothetical purchase of an
+option combination, with `none` entries omitted. Its comparison with the all-rollout empirical mean includes
 the effect of non-purchases; comparison with the purchase-conditioned empirical
 mean removes those zeros but remains subject to purchase-selection bias. The
 testbed does not infer a purchase probability from option probes or multiply the
@@ -500,13 +531,15 @@ For the `size` pseudo probe, the introduction, task, history, and current
 observation above are unchanged. Its action section and final instructions are:
 
 ```text
-Your admissible actions of the current situation are:
+Your available options for size are:
 [
 A: 3.5 ounce
 B: 10.5 ounce
+C: none (do not select any option in this group)
 ].
 
 Now you must select exactly one option for the "size" group.
+The "none" choice means never clicking any option in this group; it is not a click action.
 You must give the letter (e.g. A, B, C, AB) corresponding to the option you want to select (NOT the name of the option). You should think about which option in the "size" group best satisfies the query, and finish your thought with "The best choice for the size group corresponds to the label:" followed by the label of your chosen option.
 ```
 
@@ -537,6 +570,25 @@ observations/prompts, oracle receipt, group probe prompts/probabilities,
 trajectories, and outcome statistics. Each trajectory includes its termination
 reason, final options, raw reward, and step records with seeds, projected
 actions, format-validity flags, execution flags, and native observations.
+
+The Markdown also includes a first-turn termination table for each ASIN, showing
+counts and percentages of **all rollouts for that ASIN**:
+
+- **Return to results on first turn:** the first sampled action attempts
+  `click[< prev]` from the starting product page (`back_to_results`).
+- **Other search exit on first turn:** the first sampled action returns to the
+  search bar (`back_to_search`) or issues a new search (`search_action`).
+- **Buy immediately:** the first sampled action completes a purchase
+  (`purchase`), regardless of its reward or `--count_partial_reward`.
+
+The first turn means continuation step 1 (training step 3), excluding the two
+setup actions. These events require exactly one recorded continuation step;
+later exits or purchases and first-turn horizon exhaustion do not count.
+Each percentage is its event count divided by the total number of empirical
+trajectories, not by purchases or terminating trajectories. JSON outcome fields
+use the prefixes `first_turn_back_to_results`, `first_turn_other_search_exit`,
+and `first_turn_purchase`, each with `_count` and `_rate` suffixes. Rates are
+null (displayed as `n/a`) when there are no trajectories.
 
 The starting and pseudo prompts are always saved. Complete continuation prompts
 are optional because they repeat substantial text. A checkpoint is written

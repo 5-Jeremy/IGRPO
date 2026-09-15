@@ -14,7 +14,7 @@ import math
 import os
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -22,6 +22,7 @@ from typing import Any, Callable, Sequence
 import numpy as np
 
 from treehca.pseudo_rollout_product_page import (
+    GROUP_NONE_ACTION,
     ProductOptionGroupPseudoRollout,
     ProductOptionGroupPseudoRolloutScores,
     prepare_product_page_grouped_choice_rollouts,
@@ -229,13 +230,14 @@ def average_group_pseudo_rollout_scores(
 ) -> ProductOptionGroupPseudoRolloutScores:
     """Average aligned conditioned rows while retaining group metadata."""
     scores = tuple(scores)
-    if any(score.source_page_index != pseudo_rollout.source_page_index or score.option_group != pseudo_rollout.option_group for score in scores):
+    if any(score.source_page_index != pseudo_rollout.source_page_index or score.option_group != pseudo_rollout.option_group or score.none_is_correct != pseudo_rollout.none_is_correct for score in scores):
         raise ValueError("Every conditioned score must match the supplied group pseudo-rollout")
     averaged = average_pseudo_rollout_scores(scores)
     return ProductOptionGroupPseudoRolloutScores(
         choices=averaged.choices,
         source_page_index=pseudo_rollout.source_page_index,
         option_group=pseudo_rollout.option_group,
+        none_is_correct=pseudo_rollout.none_is_correct,
     )
 
 
@@ -249,8 +251,8 @@ def project_group_completions(
     projection: Callable[[list[str]], tuple[list[str], list[int]]] | None = None,
 ) -> EmpiricalGroupOptionSamples:
     """Project responses and construct one group's empirical denominator."""
-    group_action_to_index = {action.lower(): index for index, action in enumerate(pseudo_rollout.actions)}
-    all_option_action_set = {action.lower() for action in all_option_actions}
+    group_action_to_index = {action.lower(): index for index, action in enumerate(pseudo_rollout.actions) if action != GROUP_NONE_ACTION}
+    all_option_action_set = {action.lower() for action in all_option_actions if action != GROUP_NONE_ACTION}
     admissible_action_set = {action.lower() for action in admissible_actions}
     if not isinstance(include_valid_non_option_actions_in_denominator, bool):
         raise ValueError("include_valid_non_option_actions_in_denominator must be a boolean")
@@ -311,7 +313,7 @@ def build_generated_thinking_records(
     """Serialize conditioned probes without storing sampled chain-of-thought text."""
     if not len(scores) == len(prefixes) == empirical.total_completions == len(empirical.denominator_inclusions):
         raise ValueError("Conditioned scores, prefixes, projections, and denominator flags must align")
-    action_to_label = {action.lower(): label for label, action in zip(pseudo_rollout.labels, pseudo_rollout.actions)}
+    action_to_label = {action.lower(): label for label, action in zip(pseudo_rollout.labels, pseudo_rollout.actions) if action != GROUP_NONE_ACTION}
     correct_labels = set(pseudo_rollout.correct_labels)
     records = []
     for sample_index, (score, prefix, projected_action, format_valid, included) in enumerate(zip(scores, prefixes, empirical.projected_actions, empirical.format_valids, empirical.denominator_inclusions)):
@@ -364,6 +366,26 @@ def build_group_result(
         raise ValueError("Pseudo-rollout scores do not match the supplied option group")
     if len(empirical.action_counts) != len(scores.choices):
         raise ValueError("Empirical counts and pseudo choices must align")
+
+    none_record = None
+    if pseudo_rollout.include_none:
+        none_choice = scores.choices[-1]
+        none_record = {"label": none_choice.label, "pseudo_probability": none_choice.probability, "is_correct": pseudo_rollout.none_is_correct, "empirical_probability": None, "reason": "A single-turn response cannot establish that a group will never be selected"}
+
+        # A non-group action this turn does not mean the group is never selected.
+        # Condition only the click comparison, and retain the full none mass.
+        def condition_on_clicks(score):
+            choices = score.choices[:-1]
+            mass = math.fsum(choice.probability for choice in choices)
+            if mass <= 0:
+                raise ValueError("Cannot condition a grouped pseudo distribution with zero option-click mass")
+            return replace(score, choices=tuple(replace(choice, probability=choice.probability / mass, log_probability=math.log(choice.probability / mass) if choice.probability > 0 else -math.inf) for choice in choices), none_is_correct=False)
+
+        scores = condition_on_clicks(scores)
+        if all_sample_scores is not None:
+            all_sample_scores = condition_on_clicks(all_sample_scores)
+        empirical = replace(empirical, action_counts=empirical.action_counts[:-1])
+        pseudo_rollout = replace(pseudo_rollout, actions=pseudo_rollout.actions[:-1], labels=pseudo_rollout.labels[:-1], variant_token_ids=pseudo_rollout.variant_token_ids[:-1], include_none=False, none_is_correct=False)
 
     comparison = compare_action_distributions(
         [choice.probability for choice in scores.choices],
@@ -425,6 +447,9 @@ def build_group_result(
         "comparison_conditional_on_group_option": comparison,
         "options": option_rows,
     }
+    if none_record is not None:
+        result["none_choice"] = none_record
+        result["pseudo_click_conditioning"] = "option probabilities renormalized after excluding the none pseudo-choice"
     if response_prefix is not None:
         result["pseudo_response_prefix"] = {
             "source": response_prefix.source,
@@ -571,7 +596,7 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
         tokenizer,
         goal_options_by_page,
     )
-    all_option_actions_by_page = {page_index: tuple(action for pseudo in all_group_rollouts if pseudo.source_page_index == page_index for action in pseudo.actions) for page_index in range(len(pages))}
+    all_option_actions_by_page = {page_index: tuple(action for pseudo in all_group_rollouts if pseudo.source_page_index == page_index for action in pseudo.actions if action != GROUP_NONE_ACTION) for page_index in range(len(pages))}
     singleton_groups = [pseudo for pseudo in all_group_rollouts if len(pseudo.option_group.values) == 1]
     pseudo_rollouts = tuple(pseudo for pseudo in all_group_rollouts if len(pseudo.option_group.values) >= 2)
     if not pseudo_rollouts:

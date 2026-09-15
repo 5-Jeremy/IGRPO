@@ -12,6 +12,7 @@ from treehca.product_page_parser import ProductOptionGroup, ProductPageContextPa
 
 _LABEL_CANDIDATES = tuple(ascii_uppercase) + tuple("".join(pair) for pair in product(ascii_uppercase, repeat=2))
 _TURN_INSTRUCTION = "Now it's your turn to take one action for the current step."
+GROUP_NONE_ACTION = "none"
 _CHOICE_INSTRUCTIONS = 'You must give the label corresponding to the action you want to take. You should think about what is the logically best next action to take, and finish your thought with "The best next action is:" followed by the label of your chosen action.'
 logger = logging.getLogger(__name__)
 
@@ -51,19 +52,22 @@ class ProductOptionGroupChoicePrompt:
     prompt: str
     option_group: ProductOptionGroup
     labels: tuple[str, ...]
+    include_none: bool = False
+    none_is_correct: bool = False
 
     def __post_init__(self) -> None:
-        if len(self.labels) != len(self.option_group.values):
+        if len(self.labels) != len(self.option_group.values) + int(self.include_none):
             raise ValueError("Option-group labels and values must have equal lengths")
 
     @property
-    def label_to_option(self) -> dict[str, str]:
-        return dict(zip(self.labels, self.option_group.values))
+    def label_to_option(self) -> dict[str, str | None]:
+        values = (*self.option_group.values, None) if self.include_none else self.option_group.values
+        return dict(zip(self.labels, values))
 
     @property
     def correct_labels(self) -> tuple[str, ...]:
         correct_options = set(self.option_group.correct_options)
-        return tuple(label for label, option in zip(self.labels, self.option_group.values) if option in correct_options)
+        return tuple(label for label, option in self.label_to_option.items() if option in correct_options or (option is None and self.none_is_correct))
 
 
 @dataclass(frozen=True)
@@ -104,18 +108,23 @@ class ProductOptionGroupPseudoRollout(ProductPagePseudoRollout):
 
     source_page_index: int
     option_group: ProductOptionGroup
+    include_none: bool = False
+    none_is_correct: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if isinstance(self.source_page_index, bool) or not isinstance(self.source_page_index, int) or self.source_page_index < 0:
             raise ValueError("source_page_index must be a nonnegative integer")
         expected_actions = tuple(f"click[{option}]" for option in self.option_group.values)
+        if self.include_none:
+            expected_actions += (GROUP_NONE_ACTION,)
         if self.actions != expected_actions:
             raise ValueError("Option-group pseudo-rollout actions must match the group's values in order")
 
     @property
     def correct_actions(self) -> tuple[str, ...]:
-        return tuple(f"click[{option}]" for option in self.option_group.correct_options)
+        actions = tuple(f"click[{option}]" for option in self.option_group.correct_options)
+        return actions + (GROUP_NONE_ACTION,) if self.include_none and self.none_is_correct else actions
 
     @property
     def correct_labels(self) -> tuple[str, ...]:
@@ -160,10 +169,13 @@ class ProductOptionGroupPseudoRolloutScores(ProductPagePseudoRolloutScores):
 
     source_page_index: int
     option_group: ProductOptionGroup
+    none_is_correct: bool = False
 
     @property
     def correct_probability(self) -> float:
         correct_actions = {f"click[{option}]" for option in self.option_group.correct_options}
+        if self.none_is_correct:
+            correct_actions.add(GROUP_NONE_ACTION)
         return sum(choice.probability for choice in self.choices if choice.action in correct_actions)
 
     @property
@@ -223,7 +235,7 @@ def _validate_product_page_prompt_parts(parts: ProductPageContextParts) -> None:
         raise ValueError("History block and current-step number must either both be present or both be absent")
 
 
-def _build_product_page_prompt(parts: ProductPageContextParts, action_choices: str, instructions: str) -> str:
+def _build_product_page_prompt(parts: ProductPageContextParts, action_choices: str, instructions: str, *, selection_description: str = "Your admissible actions of the current situation are:") -> str:
     """Reconstruct the prompt body around caller-provided actions and instructions."""
     # Preserve the local templates' introduction whitespace and sentence punctuation.
     introduction_suffix = " " if parts.history_block is None else ""
@@ -233,11 +245,11 @@ def _build_product_page_prompt(parts: ProductPageContextParts, action_choices: s
     else:
         # Retain history verbatim; history-removal policy is outside these builders' contract.
         prompt += f"{parts.history_block}\nYou are now at step {parts.current_step} and your current observation is: {parts.current_observation}.\n"
-    prompt += f"Your admissible actions of the current situation are: \n[\n{action_choices}\n].\n\n"
+    prompt += f"{selection_description} \n[\n{action_choices}\n].\n\n"
     return f"{prompt}{instructions}\n"
 
 
-def _option_matches_goal(option: str, goal_option: str) -> bool:
+def _option_matches_goal(option: str, goal_option: str | tuple[str, str]) -> bool:
     """Apply the option-equivalence rule used by WebShop's reward function."""
     from thefuzz import fuzz
 
@@ -249,10 +261,32 @@ def _option_matches_goal(option: str, goal_option: str) -> bool:
 def _group_choice_instructions(group_name: str) -> str:
     return (
         f'Now you must select exactly one option for the "{group_name}" group.\n'
+        'The "none" choice means never clicking any option in this group; it is not a click action.\n'
         f"You must give the letter (e.g. A, B, C, AB) corresponding to the option you want to select (NOT the name of the option). "
         f'You should think about which option in the "{group_name}" group best satisfies the query, and finish your thought with '
         f'"The best choice for the {group_name} group corresponds to the label:" followed by the label of your chosen option.'
     )
+
+
+def _none_can_satisfy_goal(groups: Sequence[ProductOptionGroup], omitted_name: str, goal_options: Mapping[str, str]) -> bool:
+    """Check whether other groups can cover all native option-reward targets.
+
+    WebShop compares each purchased value against goal_options.items(), using
+    color normalization and token-set fuzzy matching. A bitmask DP preserves
+    the one-selection-per-group constraint without enumerating the full grid.
+    Non-option product/price/attribute eligibility remains the caller's concern.
+    """
+    targets = tuple(goal_options.items())
+    full_mask = (1 << len(targets)) - 1
+    reachable = {0}
+    for group in groups:
+        if group.name == omitted_name:
+            continue
+        masks = {sum(1 << index for index, target in enumerate(targets) if _option_matches_goal(option.lower(), target)) for option in group.values}
+        reachable = {covered | mask for covered in reachable for mask in masks | {0}}
+        if full_mask in reachable:
+            return True
+    return full_mask in reachable
 
 
 def build_product_page_grouped_choice_prompt(
@@ -278,22 +312,20 @@ def build_product_page_grouped_choice_prompt(
 
     product_fields = parse_product_page_fields(parts.current_observation, parts.admissible_actions)
     parsed_groups = product_fields.option_groups
-    missing = sorted(group.name for group in parsed_groups if group.name not in goal_options)
-    if missing:
-        raise ValueError(f"goal_options do not contain targets for product-page groups: {missing}")
-
-    max_options = max((len(group.values) for group in parsed_groups), default=0)
+    max_options = max((len(group.values) + 1 for group in parsed_groups), default=0)
     catalog = label_catalog or build_action_label_catalog(tokenizer, max_options)
     prompts = []
     for group in parsed_groups:
-        correct_options = tuple(option for option in group.values if _option_matches_goal(option, goal_options[group.name]))
-        if not correct_options:
-            raise ValueError(f"No displayed option in group {group.name!r} matches goal option {goal_options[group.name]!r}")
+        none_is_correct = _none_can_satisfy_goal(parsed_groups, group.name, goal_options)
+        correct_options = group.values if none_is_correct else tuple(option for option in group.values if group.name in goal_options and _option_matches_goal(option, goal_options[group.name]))
+        if not correct_options and not none_is_correct:
+            raise ValueError(f"No displayed option in group {group.name!r} matches its goal and omission cannot satisfy the goal")
         enriched_group = ProductOptionGroup(name=group.name, values=group.values, correct_options=correct_options)
-        labels = tuple(entry.label for entry in catalog.prefix(len(group.values)))
+        labels = tuple(entry.label for entry in catalog.prefix(len(group.values) + 1))
         action_choices = "\n".join(f"{label}: {option}" for label, option in zip(labels, group.values))
-        prompt = _build_product_page_prompt(parts, action_choices, _group_choice_instructions(group.name))
-        prompts.append(ProductOptionGroupChoicePrompt(prompt=prompt, option_group=enriched_group, labels=labels))
+        action_choices += f"\n{labels[-1]}: none (do not select any option in this group)"
+        prompt = _build_product_page_prompt(parts, action_choices, _group_choice_instructions(group.name), selection_description=f"Your available options for {group.name} are:")
+        prompts.append(ProductOptionGroupChoicePrompt(prompt=prompt, option_group=enriched_group, labels=labels, include_none=True, none_is_correct=none_is_correct))
     return tuple(prompts)
 
 
@@ -421,7 +453,7 @@ def prepare_product_page_grouped_choice_rollouts(
     for item in parts:
         _validate_product_page_prompt_parts(item)
     parsed_products = tuple(parse_product_page_fields(item.current_observation, item.admissible_actions) for item in parts)
-    max_options = max((len(group.values) for product_fields in parsed_products for group in product_fields.option_groups), default=0)
+    max_options = max((len(group.values) + 1 for product_fields in parsed_products for group in product_fields.option_groups), default=0)
     if label_catalog is not None and label_catalog.tokenizer is not tokenizer:
         raise ValueError("The action-label catalog was built for a different tokenizer instance")
     catalog = label_catalog or build_action_label_catalog(tokenizer, max_options)
@@ -438,10 +470,12 @@ def prepare_product_page_grouped_choice_rollouts(
                     prompt=choice_prompt.prompt,
                     prompt_token_ids=_tokenize_chat_prompt(tokenizer, choice_prompt.prompt),
                     labels=choice_prompt.labels,
-                    actions=tuple(f"click[{option}]" for option in choice_prompt.option_group.values),
+                    actions=tuple(f"click[{option}]" for option in choice_prompt.option_group.values) + (GROUP_NONE_ACTION,),
                     variant_token_ids=tuple(entry.token_ids for entry in entries),
                     source_page_index=source_page_index,
                     option_group=choice_prompt.option_group,
+                    include_none=True,
+                    none_is_correct=choice_prompt.none_is_correct,
                 )
             )
 
@@ -659,6 +693,7 @@ def score_product_page_grouped_choice_rollouts(
             choices=score.choices,
             source_page_index=pseudo_rollout.source_page_index,
             option_group=pseudo_rollout.option_group,
+            none_is_correct=pseudo_rollout.none_is_correct,
         )
         for pseudo_rollout, score in zip(pseudo_rollouts, scores)
     ]

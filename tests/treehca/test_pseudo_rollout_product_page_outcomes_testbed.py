@@ -93,6 +93,16 @@ def test_empirical_outcomes_include_exits_partial_purchases_invalid_actions_and_
     assert stats["full_reward_given_purchase_rate"] == 0.5
     assert stats["pseudo_minus_full_reward_given_purchase_rate"] == 0.25
     assert stats["partial_reward_purchase_count"] == 1
+    assert stats["first_turn_back_to_results_count"] == 1
+    assert stats["first_turn_other_search_exit_count"] == 2
+    assert stats["first_turn_purchase_count"] == 1
+    assert stats["first_turn_back_to_results_rate"] == pytest.approx(1 / 6)
+    assert stats["first_turn_other_search_exit_rate"] == pytest.approx(2 / 6)
+    assert stats["first_turn_purchase_rate"] == pytest.approx(1 / 6)
+    markdown = testbed.format_markdown_summary({"mode": "monte_carlo", "configuration": {"model": "example"}, "pages": [{"asin": selected.product["asin"], "outcomes": stats}]})
+    assert "Return to results on first turn" in markdown
+    assert "Buy immediately" in markdown
+    assert f"| {selected.product['asin']} | 1 (16.667%) | 2 (33.333%) | 1 (16.667%) |" in markdown
     assert sum(row["count"] for row in stats["final_option_sets"]) == 6
     assert len(start.manager.memory[0]) == 2
 
@@ -251,10 +261,11 @@ def test_complete_testbed_with_native_environments_cached_tokenizer_and_fake_log
     assert len(page["groups"]) == len(selected.product["options"])
     assert report["schema_version"] == 2
     assert page["outcomes"]["empirical_expected_reward_all"] == 1
-    assert page["outcomes"]["pseudo_expected_reward"] == page["pseudo_rewards"]["expected_reward"]
-    expected_probability = page["pseudo_rewards"]["positive_reward_probability"] if count_partial else page["outcomes"]["pseudo_all_correct_probability"]
+    expected = page["pseudo_rewards"]["expected_reward" if count_partial else "full_reward_probability"]
+    assert page["outcomes"]["pseudo_expected_reward"] == expected
+    expected_probability = page["pseudo_rewards"]["positive_reward_probability" if count_partial else "full_reward_probability"]
     assert page["outcomes"]["pseudo_reward_probability"] == expected_probability
-    assert report["summary"]["page_mean_pseudo_expected_reward"] == page["pseudo_rewards"]["expected_reward"]
+    assert report["summary"]["page_mean_pseudo_expected_reward"] == expected
     assert json.loads(args.output.read_text())["summary"]["full_reward_purchase_count"] == 3
 
 
@@ -273,7 +284,7 @@ def test_singleton_groups_are_included_in_start_scoring(native_start, monkeypatc
     episode = testbed.construct_start_episode(server, selected, seed=0)
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct", local_files_only=True)
     pseudos = prepare_product_page_grouped_choice_rollouts(extract_product_page_contexts([episode.prompt]), tokenizer, [goal["goal_options"]])
-    assert any(len(pseudo.actions) == 1 for pseudo in pseudos)
+    assert any(len(pseudo.option_group.values) == 1 and len(pseudo.actions) == 2 for pseudo in pseudos)
 
     def score(_engine, rows, **kwargs):
         return [
@@ -288,17 +299,23 @@ def test_singleton_groups_are_included_in_start_scoring(native_start, monkeypatc
     monkeypatch.setattr(testbed, "score_product_page_grouped_choice_rollouts", score)
     groups = testbed.score_start_pages(object(), tokenizer, pseudos, model_limit=8192)
     assert len(groups) == len(product["options"])
-    singleton = next(group for group in groups if len(group["options"]) == 1)
-    assert singleton["correct_probability"] == 1
+    singleton = next(group for group in groups if len(group["options"]) == 2)
+    assert singleton["options"][-1]["is_none"]
+    assert singleton["correct_probability"] == 0.5
 
 
 def test_partial_reward_rates_and_expected_rewards_use_distinct_denominators():
     trajectories = [{"purchased": bought, "full_reward": reward == 1, "raw_reward": reward, "selected_options": {}, "termination_reason": "purchase" if bought else "step_limit"} for bought, reward in [(True, 1.0), (True, 0.5), (True, 0.0), (False, 0.0)]]
-    pseudo = {"positive_reward_probability": 0.8, "expected_reward": 0.6}
+    pseudo = {"positive_reward_probability": 0.8, "expected_reward": 0.6, "full_reward_probability": 0.4}
     full = testbed.summarize_outcomes(trajectories, 0.3, pseudo_rewards=pseudo)
     partial = testbed.summarize_outcomes(trajectories, 0.3, count_partial_reward=True, pseudo_rewards=pseudo)
     assert full["reward_purchase_rate"] == 0.25
-    assert full["pseudo_reward_probability"] == 0.3
+    assert full["pseudo_reward_probability"] == 0.4
+    assert full["empirical_expected_reward_all"] == 0.25
+    assert full["empirical_expected_reward_given_purchase"] == pytest.approx(1 / 3)
+    assert full["pseudo_expected_reward"] == 0.4
+    assert full["pseudo_minus_expected_reward_all"] == pytest.approx(0.15)
+    assert full["reward_scale"] == "training_binary_0_1"
     assert partial["reward_purchase_rate"] == 0.5
     assert partial["reward_given_purchase_rate"] == pytest.approx(2 / 3)
     assert partial["pseudo_reward_probability"] == 0.8
@@ -306,7 +323,7 @@ def test_partial_reward_rates_and_expected_rewards_use_distinct_denominators():
     assert partial["positive_partial_reward_purchase_count"] == 1
     assert partial["zero_reward_purchase_count"] == 1
     assert partial["no_purchase_rate"] == 0.25
-    for stats in (full, partial):
+    for stats in (partial,):
         assert stats["empirical_expected_reward_all"] == 0.375
         assert stats["empirical_expected_reward_given_purchase"] == 0.5
         assert stats["pseudo_expected_reward"] == 0.6
@@ -392,7 +409,7 @@ def test_partial_reward_cli_aliases_and_markdown():
     for flag in ("--count_partial_reward", "--count-partial-reward"):
         assert parser.parse_args([flag]).count_partial_reward
     trajectories = [{"purchased": True, "full_reward": False, "raw_reward": 0.5, "selected_options": {}, "termination_reason": "purchase"}]
-    stats = testbed.summarize_outcomes(trajectories, 0.2, count_partial_reward=True, pseudo_rewards={"positive_reward_probability": 0.9, "expected_reward": 0.6})
+    stats = testbed.summarize_outcomes(trajectories, 0.2, count_partial_reward=True, pseudo_rewards={"positive_reward_probability": 0.9, "expected_reward": 0.6, "full_reward_probability": 0.2})
     markdown = testbed.format_markdown_summary({"mode": "monte_carlo", "configuration": {"model": "example", "count_partial_reward": True}, "pages": [{"asin": "EXAMPLE", "outcomes": stats}]})
     assert "Full or partial reward / all" in markdown
     assert "Full or partial reward / purchases" in markdown
@@ -400,3 +417,49 @@ def test_partial_reward_cli_aliases_and_markdown():
     assert "Full reward / all" not in markdown
     assert "90.000%" in markdown and "100.000%" in markdown
     assert "0.500000" in markdown and "0.600000" in markdown and "0.100000" in markdown
+
+
+def test_pseudo_none_omits_group_keys_and_retains_native_partial_rewards(native_start):
+    start, selected = native_start
+    groups = []
+    for name, values in selected.product["options"].items():
+        groups.append({"group_name": name, "options": [*[{"action": f"click[{value}]", "probability": 0.0} for value in values], {"action": "none", "probability": 1.0}]})
+    immediate_purchase = start.clone().advance("click[buy now]")
+    assert immediate_purchase["selected_options"] == {}
+    result = testbed.compute_pseudo_rewards(start, groups)
+    assert result["expected_reward"] == immediate_purchase["raw_reward"]
+    assert result["full_reward_probability"] == 0
+    assert result["positive_reward_probability"] == 1
+    import math
+
+    assert result["combination_count"] == math.prod(len(values) + 1 for values in selected.product["options"].values())
+    full = testbed.summarize_outcomes([immediate_purchase | {"termination_reason": "purchase"}], 0, pseudo_rewards=result)
+    partial = testbed.summarize_outcomes([immediate_purchase | {"termination_reason": "purchase"}], 0, pseudo_rewards=result, count_partial_reward=True)
+    assert full["pseudo_expected_reward"] == full["empirical_expected_reward_all"] == 0
+    assert partial["pseudo_expected_reward"] == partial["empirical_expected_reward_all"] == immediate_purchase["raw_reward"]
+
+
+def test_none_in_unrequested_native_group_can_receive_full_reward(native_start):
+    from treehca.product_page_parser import ProductOptionGroup
+    from treehca.pseudo_rollout_product_page import _none_can_satisfy_goal
+
+    start, selected = native_start
+    episode = start.clone()
+    goal = episode.env.server.user_sessions[episode.env.session]["goal"]
+    omitted = next(iter(goal["goal_options"]))
+    del goal["goal_options"][omitted]
+    groups = []
+    for name, values in selected.product["options"].items():
+        options = [{"action": f"click[{value}]", "probability": float(name != omitted and value == goal["goal_options"][name])} for value in values]
+        groups.append({"group_name": name, "options": [*options, {"action": "none", "probability": float(name == omitted)}]})
+    for value in goal["goal_options"].values():
+        episode.advance(f"click[{value}]")
+    # Use an independent initial clone with the same modified goal for integration.
+    initial = start.clone()
+    initial.env.server.user_sessions[initial.env.session]["goal"] = copy.deepcopy(goal)
+    result = testbed.compute_pseudo_rewards(initial, groups)
+    receipt = episode.advance("click[buy now]")
+    assert receipt["full_reward"] and omitted not in receipt["selected_options"]
+    assert result["full_reward_probability"] == result["expected_reward"] == 1
+    parsed_groups = [ProductOptionGroup(name, tuple(values)) for name, values in selected.product["options"].items()]
+    assert _none_can_satisfy_goal(parsed_groups, omitted, goal["goal_options"])

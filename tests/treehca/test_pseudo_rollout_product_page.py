@@ -134,15 +134,17 @@ def test_grouped_choice_prompt_builds_one_labeled_prompt_per_group(tokenizer, ex
 
     original_action_block = "[\n" + "\n".join(f"'{action}'," for action in components.admissible_actions) + "\n]."
     for choice in choice_prompts:
-        labeled_actions = "[\n" + "\n".join(f"{label}: {option}" for label, option in choice.label_to_option.items()) + "\n]."
+        labeled_actions = "[\n" + "\n".join(f"{label}: {option if option is not None else 'none (do not select any option in this group)'}" for label, option in choice.label_to_option.items()) + "\n]."
         group_name = choice.option_group.name
         instructions = (
             f'Now you must select exactly one option for the "{group_name}" group.\n'
+            'The "none" choice means never clicking any option in this group; it is not a click action.\n'
             "You must give the letter (e.g. A, B, C, AB) corresponding to the option you want to select (NOT the name of the option). "
             f'You should think about which option in the "{group_name}" group best satisfies the query, and finish your thought with '
             f'"The best choice for the {group_name} group corresponds to the label:" followed by the label of your chosen option.'
         )
         expected = original.replace(original_action_block, labeled_actions).replace(components.response_instructions, instructions)
+        expected = expected.replace("Your admissible actions of the current situation are:", f"Your available options for {group_name} are:")
         assert choice.prompt.strip("\n") == expected.strip("\n")
         assert not any(f"{label}: click[" in choice.prompt for label in choice.labels)
 
@@ -152,9 +154,10 @@ def test_grouped_choice_prompt_rejects_empty_actions(tokenizer, parts):
         build_product_page_grouped_choice_prompt(replace(parts, admissible_actions=()), tokenizer, {})
 
 
-def test_grouped_choice_prompt_rejects_missing_or_unmatched_goal_options(tokenizer, parts):
-    with pytest.raises(ValueError, match="do not contain targets"):
-        build_product_page_grouped_choice_prompt(parts, tokenizer, {"size": "19.7x31.5in+19.7x63in"})
+def test_grouped_choice_prompt_allows_unrequested_groups_but_rejects_unmatched_goals(tokenizer, parts):
+    choices = build_product_page_grouped_choice_prompt(parts, tokenizer, {"size": "19.7x31.5in+19.7x63in"})
+    color = next(choice for choice in choices if choice.option_group.name == "color")
+    assert color.none_is_correct and color.labels[-1] in color.correct_labels
     with pytest.raises(ValueError, match="No displayed option"):
         build_product_page_grouped_choice_prompt(parts, tokenizer, {"size": "not offered", "color": "not offered"})
 
@@ -242,18 +245,18 @@ def test_prepare_batch_reuses_catalog_and_tokenizes_chat_boundary(tokenizer, par
 def test_prepare_grouped_choice_batch_flattens_groups_and_preserves_page_identity(tokenizer):
     components = extract_product_page_contexts([example["raw_context"] for example in _EXAMPLES])
     goal_options = [_GOAL_OPTIONS[example["name"]] for example in _EXAMPLES]
-    catalog = build_action_label_catalog(tokenizer, 14)
+    catalog = build_action_label_catalog(tokenizer, 15)
 
     prepared = prepare_product_page_grouped_choice_rollouts(components, tokenizer, goal_options, label_catalog=catalog)
 
     assert tuple((item.source_page_index, item.option_group.name) for item in prepared) == ((0, "size"), (0, "color"), (2, "size"))
-    assert prepared[0].actions == tuple(f"click[{option}]" for option in prepared[0].option_group.values)
+    assert prepared[0].actions == tuple(f"click[{option}]" for option in prepared[0].option_group.values) + ("none",)
     assert prepared[0].correct_actions == ("click[19.7x31.5in+19.7x63in]",)
     assert prepared[0].correct_labels == ("C",)
     assert prepared[1].correct_actions == tuple(f"click[{option}]" for option in prepared[1].option_group.correct_options)
     assert prepared[1].correct_labels == ("B", "C", "D", "E", "F", "G")
-    assert prepared[0].variant_token_ids == tuple(entry.token_ids for entry in catalog.entries[:5])
-    assert required_max_logprobs(prepared) == 28
+    assert prepared[0].variant_token_ids == tuple(entry.token_ids for entry in catalog.entries[:6])
+    assert required_max_logprobs(prepared) == 30
     assert list(prepared[0].prompt_token_ids) == tokenizer.apply_chat_template(
         [{"role": "user", "content": prepared[0].prompt}],
         tokenize=True,
@@ -312,12 +315,12 @@ def test_grouped_choice_rollouts_use_existing_scorer_and_sum_all_correct_options
     assert size_scores is not None
     assert size_scores.source_page_index == 0
     assert size_scores.option_group == prepared[0].option_group
-    assert size_scores.correct_probability == pytest.approx(11 / 55)
-    assert size_scores.correct_log_probability == pytest.approx(math.log(11 / 55))
+    assert size_scores.correct_probability == pytest.approx(11 / 78)
+    assert size_scores.correct_log_probability == pytest.approx(math.log(11 / 78))
     assert color_scores is not None
     assert color_scores.option_group == prepared[1].option_group
     # Labels B through G are all correct after color normalization.
-    assert color_scores.correct_probability == pytest.approx((7 + 11 + 15 + 19 + 23 + 27) / 406)
+    assert color_scores.correct_probability == pytest.approx((7 + 11 + 15 + 19 + 23 + 27) / 465)
     assert sum(color_scores.action_probabilities.values()) == pytest.approx(1.0)
 
 
@@ -421,3 +424,39 @@ def test_scoring_rejects_vllm_v1_unconstrained_logprobs(tokenizer, parts):
     with pytest.raises(ValueError, match="VLLM_USE_V1=0"):
         score_product_page_pseudo_rollouts(engine, prepared)
     assert engine.calls == []
+
+
+def test_none_is_distinct_from_a_literal_none_option_and_scores_optional_group(tokenizer, parts):
+    observation = "'Back to Search' [SEP] '< Prev' [SEP] 'style' [SEP] 'none' [SEP] 'plain' [SEP] 'Towel' [SEP] 'Price: $10.00' [SEP] 'Rating: N.A.' [SEP] 'Description' [SEP] 'Features' [SEP] 'Buy Now'"
+    actions = ("click[back to search]", "click[< prev]", "click[none]", "click[plain]", "click[description]", "click[features]", "click[buy now]")
+    components = replace(parts, current_observation=observation, admissible_actions=actions)
+    (choice,) = build_product_page_grouped_choice_prompt(components, tokenizer, {})
+    assert choice.label_to_option == {"A": "none", "B": "plain", "C": None}
+    assert choice.none_is_correct
+    assert choice.correct_labels == ("A", "B", "C")
+    (pseudo,) = prepare_product_page_grouped_choice_rollouts([components], tokenizer, [{}])
+    assert pseudo.actions == ("click[none]", "click[plain]", "none")
+    assert pseudo.correct_actions == pseudo.actions
+    (score,) = score_product_page_grouped_choice_rollouts(_FakeInferenceEngine(), [pseudo])
+    assert score.none_is_correct
+    assert score.correct_probability == pytest.approx(1)
+    assert score.action_probabilities["none"] > 0
+    (required,) = build_product_page_grouped_choice_prompt(components, tokenizer, {"style": "plain"})
+    assert not required.none_is_correct
+    assert required.labels[-1] not in required.correct_labels
+
+
+def test_none_correctness_uses_cross_group_coverage_without_selecting_two_values_from_one_group():
+    from treehca.product_page_parser import ProductOptionGroup
+    from treehca.pseudo_rollout_product_page import _none_can_satisfy_goal
+
+    groups = (ProductOptionGroup("color", ("red", "blue")), ProductOptionGroup("style", ("red floral", "striped")))
+    assert _none_can_satisfy_goal(groups, "color", {"color": "red"})
+    assert _none_can_satisfy_goal(groups, "style", {"color": "red"})
+    groups = (ProductOptionGroup("color", ("red", "blue")), ProductOptionGroup("size", ("large", "small")), ProductOptionGroup("combined", ("red", "large")))
+    # Omitting color leaves a size group and a combined group: large + red works.
+    assert _none_can_satisfy_goal(groups, "color", {"color": "red", "size": "large"})
+    # Only one of red/large can be selected from combined; unioning all its
+    # values would incorrectly claim the missing group is dispensable.
+    limited = (ProductOptionGroup("required", ("red large",)), ProductOptionGroup("combined", ("red", "large")))
+    assert not _none_can_satisfy_goal(limited, "required", {"color": "red", "size": "large"})

@@ -23,7 +23,7 @@ from typing import Any, Callable, Sequence
 import numpy as np
 
 from treehca.product_page_parser import extract_product_page_contexts, parse_product_page_fields
-from treehca.pseudo_rollout_product_page import prepare_product_page_grouped_choice_rollouts, required_max_logprobs, score_product_page_grouped_choice_rollouts
+from treehca.pseudo_rollout_product_page import GROUP_NONE_ACTION, prepare_product_page_grouped_choice_rollouts, required_max_logprobs, score_product_page_grouped_choice_rollouts
 from treehca.pseudo_rollout_product_page_choices_testbed import _DEFAULT_ATTRIBUTES, _DEFAULT_CATALOG, _WEBSHOP_ROOT, _wilson_interval
 from treehca.pseudo_rollout_product_page_grouped_choices_testbed import (
     SelectedProductGoal,
@@ -267,10 +267,13 @@ def compute_pseudo_rewards(start: ProductEpisode, groups: Sequence[dict[str, Any
         for choice in group["options"]:
             action, value = engine.parse_action(choice["action"])
             probability = float(choice["probability"])
-            if action != "click" or value is None or not math.isfinite(probability) or probability < 0:
+            is_none = choice["action"] == GROUP_NONE_ACTION
+            if (not is_none and (action != "click" or value is None)) or not math.isfinite(probability) or probability < 0:
                 raise ValueError("Expected option clicks with finite nonnegative pseudo probabilities")
-            values.append((value.lower(), probability))
+            values.append((None if is_none else value.lower(), probability))
         expected_values = {value.lower() for key, options in item["options"].items() if key.lower() == name for value in options}
+        if any(value is None for value, _ in values):
+            expected_values.add(None)
         if len({value for value, _ in values}) != len(values) or {value for value, _ in values} != expected_values:
             raise ValueError("Pseudo reward integration requires every option value exactly once")
         if not math.isclose(math.fsum(probability for _, probability in values), 1.0, rel_tol=1e-9, abs_tol=1e-9):
@@ -279,7 +282,7 @@ def compute_pseudo_rewards(start: ProductEpisode, groups: Sequence[dict[str, Any
 
     mass_by_reward, counts_by_reward = Counter(), Counter()
     for combination in product(*choices):
-        options = dict(zip(names, (value for value, _ in combination)))
+        options = {name: value for name, (value, _) in zip(names, combination) if value is not None}
         probability = math.prod(probability for _, probability in combination)
         # Call the very same function as SimServer.done, including set-wise fuzzy
         # matching and attribute/price/type components; no reward approximation.
@@ -309,12 +312,12 @@ def summarize_outcomes(
     """Retain both unconditional and purchase-conditioned denominators."""
     total = len(trajectories)
     purchased = sum(record["purchased"] for record in trajectories)
-    full = sum(record["full_reward"] for record in trajectories)
+    full = sum(record["purchased"] and record["raw_reward"] == 1.0 for record in trajectories)
     positive = sum(record["purchased"] and record["raw_reward"] > 0 for record in trajectories)
-    reward_sum = math.fsum(record["raw_reward"] for record in trajectories if record["purchased"])
+    reward_sum = math.fsum(record["raw_reward"] for record in trajectories if record["purchased"]) if count_partial_reward else full
     counted = positive if count_partial_reward else full
-    selected_pseudo = (pseudo_rewards["positive_reward_probability"] if pseudo_rewards is not None else None) if count_partial_reward else pseudo_probability
-    pseudo_expected = pseudo_rewards["expected_reward"] if pseudo_rewards is not None else None
+    selected_pseudo = pseudo_rewards["positive_reward_probability" if count_partial_reward else "full_reward_probability"] if pseudo_rewards is not None else (None if count_partial_reward else pseudo_probability)
+    pseudo_expected = pseudo_rewards["expected_reward"] if count_partial_reward and pseudo_rewards is not None else selected_pseudo
     result = {
         "trajectories": total,
         "no_purchase_count": total - purchased,
@@ -328,12 +331,22 @@ def summarize_outcomes(
         "zero_reward_purchase_count": purchased - positive,
         "count_partial_reward": count_partial_reward,
         "reward_event": "positive_native_reward" if count_partial_reward else "full_native_reward",
+        "reward_scale": "native_fractional" if count_partial_reward else "training_binary_0_1",
         "reward_purchase_count": counted,
         "pseudo_reward_probability": selected_pseudo,
         "empirical_expected_reward_all": reward_sum / total if total else None,
         "empirical_expected_reward_given_purchase": reward_sum / purchased if purchased else None,
         "pseudo_expected_reward": pseudo_expected,
     }
+    # Count sampled continuation turns, excluding the two setup actions.
+    first_turn_counts = Counter(record["termination_reason"] for record in trajectories if len(record.get("steps", [])) == 1)
+    for name, count in (
+        ("first_turn_back_to_results", first_turn_counts["back_to_results"]),
+        ("first_turn_other_search_exit", first_turn_counts["back_to_search"] + first_turn_counts["search_action"]),
+        ("first_turn_purchase", first_turn_counts["purchase"]),
+    ):
+        result[f"{name}_count"] = count
+        result[f"{name}_rate"] = count / total if total else None
     for name, count, denominator in (
         ("no_purchase", total - purchased, total),
         ("partial_reward_purchase", purchased - full, total),
@@ -348,7 +361,8 @@ def summarize_outcomes(
         result[f"{name}_wilson_95"] = list(_wilson_interval(count, denominator))
     for name in ("full_reward_purchase", "full_reward_given_purchase"):
         rate = result[f"{name}_rate"]
-        result[f"pseudo_minus_{name}_rate"] = pseudo_probability - rate if pseudo_probability is not None and rate is not None else None
+        full_pseudo = pseudo_rewards["full_reward_probability"] if pseudo_rewards is not None else pseudo_probability
+        result[f"pseudo_minus_{name}_rate"] = full_pseudo - rate if full_pseudo is not None and rate is not None else None
     for name in ("reward_purchase", "reward_given_purchase"):
         rate = result[f"{name}_rate"]
         result[f"pseudo_minus_{name}_rate"] = selected_pseudo - rate if selected_pseudo is not None and rate is not None else None
@@ -403,11 +417,12 @@ def score_start_pages(engine: Any, tokenizer: Any, pseudo_rollouts: Sequence[Any
             "source_page_index": pseudo.source_page_index,
             "group_name": pseudo.option_group.name,
             "correct_options": list(pseudo.option_group.correct_options),
+            "none_is_correct": pseudo.none_is_correct,
             "correct_probability": score.correct_probability,
             "prompt": pseudo.prompt,
             "assistant_response_prefix": prefix.text,
             "prompt_token_count": len(pseudo.prompt_token_ids),
-            "options": [{"label": choice.label, "action": choice.action, "probability": choice.probability} for choice in score.choices],
+            "options": [{"label": choice.label, "action": choice.action, "is_none": choice.action == GROUP_NONE_ACTION, "probability": choice.probability} for choice in score.choices],
         }
         for pseudo, prefix, score in zip(pseudo_rollouts, prefixes, scores)
     ]
@@ -419,8 +434,10 @@ def format_markdown_summary(report: dict[str, Any]) -> str:
 
     partial = report["configuration"].get("count_partial_reward", False)
     reward_label = "Full or partial reward" if partial else "Full reward"
-    pseudo_label = "Pseudo positive reward" if partial else "Pseudo all correct"
-    explanation = "The pseudo positive-reward probability sums independent option-combination probabilities whose native purchase reward is greater than zero." if partial else "The pseudo all-correct estimate multiplies the correct-label mass of every option group, including singleton groups."
+    pseudo_label = "Pseudo positive reward" if partial else "Pseudo full reward"
+    explanation = (
+        "The pseudo positive-reward probability sums independent option-combination probabilities whose native purchase reward is greater than zero." if partial else "The pseudo full-reward probability sums independent option-combination probabilities whose native purchase reward is exactly one."
+    )
     lines = [
         "# Product-page continuation outcome testbed",
         "",
@@ -437,7 +454,7 @@ def format_markdown_summary(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "Expected raw rewards (0–1), including fractional rewards in both modes; non-purchases contribute zero to the all-rollout mean.",
+            ("Expected native fractional rewards (0–1)." if partial else "Expected training-style binary rewards (0 or 1); partial purchases contribute zero.") + " Non-purchases contribute zero to the all-rollout mean.",
             "",
             "| ASIN | Empirical E[R] / all | Empirical E[R] / purchases | Pseudo E[R] | Pseudo minus all | Pseudo minus purchases |",
             "| --- | ---: | ---: | ---: | ---: | ---: |",
@@ -447,6 +464,21 @@ def format_markdown_summary(report: dict[str, Any]) -> str:
         result = page.get("outcomes", {})
         values = [result.get(key) for key in ("empirical_expected_reward_all", "empirical_expected_reward_given_purchase", "pseudo_expected_reward", "pseudo_minus_expected_reward_all", "pseudo_minus_expected_reward_given_purchase")]
         lines.append(f"| {page['asin']} | " + " | ".join("n/a" if value is None else f"{value:.6f}" for value in values) + " |")
+    lines.extend(
+        [
+            "",
+            "First-turn terminations: counts and percentages of all rollouts for each ASIN. "
+            "The first turn is the first sampled action after the product-page setup (training step 3). "
+            "Immediate purchases count regardless of reward. Other search exits mean returning to the search bar or issuing a new search.",
+            "",
+            "| ASIN | Return to results on first turn | Other search exit on first turn | Buy immediately |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+    )
+    for page in report["pages"]:
+        result = page.get("outcomes", {})
+        cells = [f"{result[name + '_count']} ({rate(result[name + '_rate'])})" if name + "_count" in result else "n/a" for name in ("first_turn_back_to_results", "first_turn_other_search_exit", "first_turn_purchase")]
+        lines.append(f"| {page['asin']} | " + " | ".join(cells) + " |")
     lines.extend(["", "JSON includes exact prompts, oracle receipts, actions, final option sets, termination reasons, Wilson 95% rate intervals, native pseudo reward distributions, and probability/expected-reward gaps.", ""])
     return "\n".join(lines)
 
@@ -569,7 +601,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-products", type=int, default=1000, help="Native WebShop catalog/index size")
     parser.add_argument("--num-pages", type=int, default=20)
     parser.add_argument("--samples-per-page", type=int, default=256)
-    parser.add_argument("--count_partial_reward", "--count-partial-reward", action="store_true", help="Compare positive native rewards (full or partial) instead of only full rewards; expected raw rewards are reported in both modes")
+    parser.add_argument("--count_partial_reward", "--count-partial-reward", action="store_true", help="Count positive native rewards and compute fractional expected rewards; default rewards are training-style binary 0/1")
     parser.add_argument("--max-steps", type=int, default=13, help="Additional actions after the two setup steps; at most 13")
     parser.add_argument("--history-length", type=int, default=2)
     parser.add_argument("--results-size", type=int, default=10)

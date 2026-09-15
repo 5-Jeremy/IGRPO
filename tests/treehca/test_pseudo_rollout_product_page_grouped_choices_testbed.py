@@ -347,3 +347,32 @@ def test_report_is_serializable_and_markdown_emphasizes_both_directions(tmp_path
     write_report(report, json_path, markdown_path)
     assert json.loads(json_path.read_text())["summary"]["groups_evaluated"] == 1
     assert markdown_path.read_text() == markdown
+
+
+def test_none_is_unobservable_in_one_turn_and_click_comparison_is_conditioned():
+    import math
+    from dataclasses import replace
+
+    page, pseudo, scores, _ = _group_inputs()
+    pseudo = replace(pseudo, labels=(*pseudo.labels, "D"), actions=(*pseudo.actions, "none"), variant_token_ids=(*pseudo.variant_token_ids, (16, 17)), include_none=True)
+    scores = replace(scores, choices=tuple(replace(choice, probability=choice.probability / 2) for choice in scores.choices) + (ActionChoiceScore("D", "none", 0.5, math.log(0.5), -1, -1),))
+    empirical = project_group_completions(
+        ["red", "buy", "blue", "none"],
+        pseudo,
+        admissible_actions=(*pseudo.actions[:-1], "click[buy now]"),
+        all_option_actions=pseudo.actions,
+        projection=lambda _: (["click[red]", "click[buy now]", "click[blue]", "none"], [1, 1, 1, 0]),
+    )
+    assert empirical.action_counts == (1, 0, 1, 0)
+    assert empirical.probability_denominator == 2
+    result = build_group_result(page, pseudo, scores, empirical, real_prompt_tokens=20, bootstrap_replicates=100, seed=0)
+    assert result["none_choice"]["pseudo_probability"] == 0.5
+    assert result["none_choice"]["empirical_probability"] is None
+    assert len(result["options"]) == 3
+    assert sum(row["pseudo_probability"] for row in result["options"]) == pytest.approx(1)
+    assert result["pseudo_correct_probability"] == pytest.approx(0.75)
+    assert result["empirical_correct_probability_conditional"] == 0.5
+    assert all(row["action"] != "none" for row in result["options"])
+    averaged = average_group_pseudo_rollout_scores(replace(pseudo, none_is_correct=True), [replace(scores, none_is_correct=True)])
+    assert averaged.none_is_correct
+    assert averaged.correct_probability == pytest.approx(0.875)

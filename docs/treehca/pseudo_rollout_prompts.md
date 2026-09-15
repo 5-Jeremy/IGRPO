@@ -120,18 +120,54 @@ History removal is also outside this builder's current contract.
 `build_product_page_grouped_choice_prompt` builds one prompt for each parsed
 product option group. Each prompt retains the task and observation but replaces
 the admissible-action block with letter-labeled bare option values for only that
-group, such as `A: red`; the displayed options do not use the environment's
+group. Its selection description is `Your available options for {group_name} are:`
+(for example, `Your available options for size are:`). Choices such as `A: red`
+do not use the environment's
 `click[...]` wrapper. Its instructions name the group explicitly and request
-one label. A product page without option groups returns an empty tuple.
+one label. Every group appends a final labeled choice:
+
+```text
+C: none (do not select any option in this group)
+```
+
+The label depends on the number of catalog options. `none` means never clicking
+an option in this group, not executing `click[none]`. The prompt explains this
+explicitly. A real catalog value named `none` remains an ordinary clickable
+option and is distinct from the final synthetic choice. Non-grouped pseudo
+prompts are unchanged. A product page without option groups returns an empty tuple.
 
 The caller supplies the active synthetic goal's `goal_options` mapping. For
 each group, `ProductOptionGroup.correct_options` contains every displayed value
 that matches the canonical goal value under WebShop's color normalization and
 fuzzy token-set threshold. `ProductOptionGroupChoicePrompt.correct_labels`
-provides the corresponding response labels in prompt order. Missing goal
-groups or groups with no matching displayed value raise `ValueError`; extra
-goal groups are allowed because an agent can be viewing a product with fewer
-option groups than the goal product.
+provides the corresponding response labels in prompt order, including the
+synthetic label when `none_is_correct` is true. A group not named in the goal is
+allowed. Unmatched goals still raise `ValueError` if neither its displayed
+choices nor omission can satisfy the option requirements.
+
+Omission correctness asks whether **some** selection of at most one value from
+each other group covers every native option-reward target. The code uses
+WebShop's color normalization and fuzzy token-set threshold, with the same
+`goal_options.items()` target representation as native synthetic rewards. A
+bitmask dynamic program enforces one value per group; merely taking the union
+of all available values would incorrectly permit selecting two values in one
+group. No requested options means omission is correct for every group.
+Cross-group fuzzy matches can also make a named group dispensable.
+
+This is an option-reward feasibility test, assuming the product's other reward
+components are satisfied. In the outcome testbed that assumption is verified
+by the native oracle purchase. For general callers, prompt text alone does not
+prove the product's attribute/type/price eligibility. If omission is feasible,
+adding any option in the omitted group cannot reduce native option coverage,
+so those displayed values are also marked correct. `none_is_correct` is stored
+separately from `ProductOptionGroup.correct_options`; the parser's catalog
+values are never modified.
+
+These per-group correctness labels are existential, not a guarantee that every
+combination of independently correct choices earns full reward. Two groups may
+each be dispensable when the other is selected, while omitting both loses
+credit. The outcome testbed therefore evaluates each joint combination with the
+native reward function rather than relying on a product of correctness labels.
 
 `prepare_product_page_grouped_choice_rollouts` accepts one goal mapping per
 source page and flattens the page/group hierarchy in page order, then group
@@ -141,9 +177,16 @@ display order. Each `ProductOptionGroupPseudoRollout` records its
 `score_product_page_pseudo_rollouts`. Assistant-response prefixes, when used,
 must align with this flattened group-rollout order.
 
-The prepared rollout's internal `actions` remain canonical WebShop
-`click[option]` strings. That metadata is not displayed in the group prompt; it
-keeps scores aligned with projected empirical environment actions.
+The prepared rollout's real-option `actions` remain canonical WebShop
+`click[option]` strings; the last action is the reserved pseudo sentinel `none`.
+`ProductOptionGroupChoicePrompt.label_to_option` maps that last label to Python
+`None`, which cannot collide with the literal catalog string `"none"`.
+`include_none` and `none_is_correct` are retained in prepared metadata; scoring
+propagates `none_is_correct` and adds the sentinel's probability to correct mass
+when appropriate. Label capacity and required logprob counts include the extra
+label's bare and leading-space tokens. The sentinel is never an environment
+command. Real-option metadata keeps scores aligned with projected empirical
+environment actions.
 
 `score_product_page_grouped_choice_rollouts` is a thin group-aware wrapper over
 the unchanged generic scorer. Its results retain the source-page and group

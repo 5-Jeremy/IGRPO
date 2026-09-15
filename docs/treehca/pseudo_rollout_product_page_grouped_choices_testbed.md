@@ -37,8 +37,39 @@ default:
    one of that group's options.
 
 All groups on a page reuse the same ordinary completion batch. Singleton groups
-are excluded because both their pseudo and conditional empirical distributions
-are necessarily 1.0 and would add no evidence about calibration.
+are excluded because their click-conditioned pseudo and empirical distributions
+are necessarily 1.0 and would add no evidence about click calibration. Their
+unconditional pseudo distributions do have two choices: the option and `none`.
+
+Every probe now includes a final labeled `none` choice, meaning the agent never
+clicks an option in that group. Its correctness metadata follows the
+[omission feasibility rule](pseudo_rollout_prompts.md#group-specific-option-prompts).
+A single ordinary response cannot establish "never", including when it chooses
+another group or navigation. This testbed therefore does **not** count such
+responses (or a malformed response literally saying `none`) as empirical
+`none` selections.
+
+The JSON records the unconditioned sentinel mass in `none_choice`, with its
+label, correctness flag, and `empirical_probability: null`. For the existing
+option comparison only, the pseudo probabilities of real options are
+renormalized by their total click mass:
+
+```text
+p_click(option) = p(option) / sum_real_options p(option)
+```
+
+The `options` rows, group correct mass, comparison statistics, and analyzer
+continue to use this click-conditioned distribution. Its relation to raw
+`none` mass is explicit in `pseudo_click_conditioning`. If the click mass is
+numerically zero, conditioning raises an error rather than fabricating a
+distribution. Generated-thinking probes also preserve the unconditioned `none`
+probability in the group summary; their comparison distribution is conditioned
+after averaging the appropriate probe rows. Per-completion probe records retain
+the original unconditioned scores.
+
+Use the continuation outcome testbed to measure final omission behavior: it
+retains all `none` probability mass, evaluates missing group keys through the
+native reward function, and stores actual final option dictionaries.
 
 The conditioning matters. A completion that selects an option from another
 group, a navigation control, `buy now`, or an inadmissible action does not enter
