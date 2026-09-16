@@ -62,10 +62,9 @@ The `options` rows, group correct mass, comparison statistics, and analyzer
 continue to use this click-conditioned distribution. Its relation to raw
 `none` mass is explicit in `pseudo_click_conditioning`. If the click mass is
 numerically zero, conditioning raises an error rather than fabricating a
-distribution. Generated-thinking probes also preserve the unconditioned `none`
-probability in the group summary; their comparison distribution is conditioned
-after averaging the appropriate probe rows. Per-completion probe records retain
-the original unconditioned scores.
+distribution. Shared-thinking probes also preserve the unconditioned `none`
+probability in the group summary; their option comparison remains conditioned
+on a group option click.
 
 Use the continuation outcome testbed to measure final omission behavior: it
 retains all `none` probability mass, evaluates missing group keys through the
@@ -96,28 +95,25 @@ scorer's existing `assistant_response_prefix_token_ids` interface.
 
 ## Generated-thinking pseudo probabilities
 
-`--condition-pseudo-on-thinking` replaces the default artificial-prefix probe
-with one probe for every ordinary completion and option group. For a completion
-containing a complete `<think>...</think>` block, the testbed keeps the text up
-to but not including `</think>`, removes the original action and other suffix,
-then appends this group-specific cue:
+`--condition-pseudo-on-thinking` samples one complete `<think>...</think>`
+segment per page. The segment is appended after that page's real prompt, and
+every empirical completion samples its action from this same assistant prefix.
+The completed thought is restored before WebShop projects and counts each
+response. If the initial page sample does not contain a complete thought within
+`--max-new-tokens`, the run fails with the page index and ASIN.
+
+For every option group on the page, the pseudo probe uses the same thought. It
+replaces `</think>` with this group-specific cue:
 
 ```text
 The best choice for the {group_name} group corresponds to the label:
 ```
 
 The edited prefix is re-tokenized without special tokens before the constrained
-label is scored. If no complete thinking block exists, only the group-specific
-cue is used. This matches the generated-thinking intervention in the
-full-action testbed while making the requested group explicit.
-
-The reported `pseudo_probability` is averaged over exactly the completion rows
-included in that group's configured empirical denominator. If that denominator
-is empty, all completion rows are used as a fallback so the pseudo probability
-remains defined. `pseudo_probability_all_samples` preserves the unconditional
-average for diagnosis. The JSON also records per-sample probabilities and
-prefix metadata under `conditioned_pseudo_rollouts`, but it deliberately does
-not store the generated thought text.
+label is scored. Each group is scored once, and its pseudo probability is
+compared with empirical action frequencies from the same page thought. The JSON
+records the thought and pseudo prefix token counts under `shared_page_thinking`
+without storing the thought text.
 
 ## Running the testbed
 
@@ -141,9 +137,9 @@ it. Important controls are:
   goodness-of-fit calculation;
 - `--high-probability-threshold`: the strict threshold used by the report's
   decisive-option summary, defaulting to `0.6`;
-- `--condition-pseudo-on-thinking`: use generated thinking from each ordinary
-  completion instead of the single artificial thinking prefix;
-- `--pseudo-score-batch-size`: cap the number of generated-thinking group
+- `--condition-pseudo-on-thinking`: share one generated thought per page across
+  empirical completions and group pseudo probes;
+- `--pseudo-score-batch-size`: cap the number of shared-thinking group
   probes submitted in each scorer call;
 - `--include-valid-non-option-actions-in-empirical-denominator`: include valid
   non-option actions in every group's empirical denominator while continuing to
@@ -167,9 +163,9 @@ conda run --no-capture-output -n webshop \
   --output outputs/pseudo_rollout_grouped_choice_thinking_calibration.json
 ```
 
-This mode performs `samples-per-page × multi-option-groups-on-page` constrained
-pseudo probes in addition to the ordinary completions, so it is substantially
-more expensive than the default artificial-prefix mode.
+This mode samples one extra initial response per page and performs one
+constrained pseudo probe per multi-option group. The empirical completions
+start after the shared thought.
 
 ## Aggregate correct-option analysis
 

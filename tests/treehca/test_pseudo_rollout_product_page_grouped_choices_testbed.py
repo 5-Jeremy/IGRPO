@@ -1,10 +1,14 @@
 """CPU-only tests for the grouped-choice probability testbed."""
 
 import json
+import sys
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from treehca import pseudo_rollout_product_page_grouped_choices_testbed as testbed
 from treehca.product_page_parser import ProductOptionGroup, ProductPageContextParts
 from treehca.pseudo_rollout_product_page import ActionChoiceScore, ProductOptionGroupPseudoRollout, ProductOptionGroupPseudoRolloutScores
 from treehca.pseudo_rollout_product_page_choices_testbed import RenderedProductPage, SampledAgentResponse
@@ -12,14 +16,15 @@ from treehca.pseudo_rollout_product_page_grouped_choices_testbed import (
     EmpiricalGroupOptionSamples,
     GroupResponsePrefix,
     SelectedProductGoal,
-    average_group_pseudo_rollout_scores,
     build_argument_parser,
     build_artificial_group_response_prefixes,
-    build_generated_thinking_records,
     build_group_result,
     extract_generated_group_thinking_prefix,
+    extract_page_thinking_prefix,
     format_markdown_summary,
+    prepend_page_thinking_to_completions,
     project_group_completions,
+    run_testbed,
     sample_diverse_product_goals,
     score_generated_thinking_group_pseudo_rollouts,
     summarize_group_results,
@@ -168,31 +173,31 @@ def test_generated_thinking_prefix_retains_thought_and_appends_group_specific_cu
     _, pseudo, _, _ = _group_inputs()
     tokenizer = _PrefixTokenizer()
 
+    page_thinking = extract_page_thinking_prefix(
+        SampledAgentResponse("<think>Compare the requested colors. </think><action>click[red]</action>", (1, 2)), tokenizer
+    )
     prefix = extract_generated_group_thinking_prefix(
-        SampledAgentResponse("<think>Compare the requested colors. </think><action>click[red]</action>", (1, 2)),
-        pseudo,
-        tokenizer,
-    )
-    malformed = extract_generated_group_thinking_prefix(
-        SampledAgentResponse("No closing thought <action>click[red]</action>", (3, 4)),
+        page_thinking,
         pseudo,
         tokenizer,
     )
 
+    assert page_thinking.text == "<think>Compare the requested colors. </think>"
     assert prefix.text == "<think>Compare the requested colors.\nThe best choice for the color group corresponds to the label:"
-    assert prefix.source == "generated_thinking"
+    assert prefix.source == "generated_page_thinking"
     assert prefix.status == "complete_thinking_block"
-    assert malformed.text == "The best choice for the color group corresponds to the label:"
-    assert malformed.status == "no_complete_thinking_block"
+    with pytest.raises(ValueError, match="no complete"):
+        extract_page_thinking_prefix(SampledAgentResponse("No closing thought <action>click[red]</action>", (3, 4)), tokenizer)
+
+    continued = prepend_page_thinking_to_completions((SampledAgentResponse("<action>click[blue]</action>", (9,)),), page_thinking)
+    assert continued[0].text == "<think>Compare the requested colors. </think><action>click[blue]</action>"
+    assert continued[0].token_ids == page_thinking.token_ids + (9,)
 
 
-def test_generated_thinking_scores_are_batched_and_keep_group_alignment(monkeypatch):
+def test_generated_thinking_scores_each_group_once_from_shared_page_thought(monkeypatch):
     _, pseudo, scores, _ = _group_inputs()
     tokenizer = _PrefixTokenizer()
-    completions = (
-        SampledAgentResponse("<think>first</think><action>click[red]</action>", (1,)),
-        SampledAgentResponse("<think>second</think><action>click[blue]</action>", (2,)),
-    )
+    page_thinking = extract_page_thinking_prefix(SampledAgentResponse("<think>first</think><action>click[red]</action>", (1,)), tokenizer)
     calls = []
 
     def fake_score(_engine, pseudo_batch, **kwargs):
@@ -200,78 +205,101 @@ def test_generated_thinking_scores_are_batched_and_keep_group_alignment(monkeypa
         return [scores] * len(pseudo_batch)
 
     monkeypatch.setitem(score_generated_thinking_group_pseudo_rollouts.__globals__, "score_product_page_grouped_choice_rollouts", fake_score)
-    score_batches, prefix_batches = score_generated_thinking_group_pseudo_rollouts(
+    group_scores, group_prefixes = score_generated_thinking_group_pseudo_rollouts(
         object(),
         tokenizer,
-        [pseudo],
-        {2: completions},
+        [pseudo, pseudo],
+        {2: page_thinking},
         max_model_len=100,
         batch_size=1,
     )
 
-    assert score_batches == ((scores, scores),)
-    assert len(prefix_batches[0]) == 2
+    assert group_scores == (scores, scores)
+    assert group_prefixes[0] == group_prefixes[1]
     assert len(calls) == 2
     assert all(call[0] == (pseudo,) for call in calls)
     assert all(call[1]["max_model_len"] == 100 for call in calls)
-    assert calls[0][1]["assistant_response_prefix_token_ids"] == [prefix_batches[0][0].token_ids]
+    assert calls[0][1]["assistant_response_prefix_token_ids"] == [group_prefixes[0].token_ids]
 
 
-def test_generated_thinking_aggregation_uses_empirical_denominator_mask():
-    page, pseudo, first_scores, _ = _group_inputs()
-    second_scores = ProductOptionGroupPseudoRolloutScores(
-        choices=(
-            ActionChoiceScore("A", "click[red]", 0.10, -2.302585, -1.0, -1.0),
-            ActionChoiceScore("B", "click[scarlet]", 0.20, -1.609438, -1.0, -1.0),
-            ActionChoiceScore("C", "click[blue]", 0.70, -0.356675, -1.0, -1.0),
-        ),
-        source_page_index=2,
-        option_group=pseudo.option_group,
-    )
-    empirical = EmpiricalGroupOptionSamples(
-        action_counts=(1, 0, 0),
-        total_completions=2,
-        format_valid_completions=2,
-        recognized_completions=1,
-        recognized_with_invalid_format=0,
-        invalid_format_completions=0,
-        inadmissible_completions=0,
-        invalid_examples=(),
-        projected_actions=("click[red]", "click[large]"),
-        format_valids=(1, 1),
-        probability_denominator=1,
-        denominator_inclusions=(True, False),
-    )
-    prefixes = (
-        GroupResponsePrefix("first", (1,), "generated_thinking", "complete_thinking_block"),
-        GroupResponsePrefix("second", (2,), "generated_thinking", "complete_thinking_block"),
-    )
+def test_conditioned_run_shares_one_page_thought_between_empirical_and_pseudo(monkeypatch, tmp_path):
+    page, pseudo, scores, _ = _group_inputs()
+    pseudo = replace(pseudo, source_page_index=0)
+    scores = replace(scores, source_page_index=0)
+    tokenizer = _PrefixTokenizer()
+    calls = []
 
-    included_scores = [score for score, included in zip((first_scores, second_scores), empirical.denominator_inclusions) if included]
-    averaged = average_group_pseudo_rollout_scores(pseudo, included_scores)
-    all_sample_average = average_group_pseudo_rollout_scores(pseudo, (first_scores, second_scores))
-    records = build_generated_thinking_records(pseudo, (first_scores, second_scores), prefixes, empirical)
+    class FakeLLM:
+        def __init__(self, **_kwargs):
+            self.llm_engine = SimpleNamespace(model_config=SimpleNamespace(max_model_len=1000))
+
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=lambda *_args, **_kwargs: tokenizer)))
+    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(LLM=FakeLLM))
+    monkeypatch.setattr(testbed, "_configure_vllm_engine", lambda: None)
+    monkeypatch.setattr(testbed, "load_webshop_products_and_goals", lambda *_args: ([{}], [{}]))
+    monkeypatch.setattr(testbed, "sample_diverse_product_goals", lambda *_args: (SelectedProductGoal({}, {"goal_options": {"color": "red"}, "instruction_text": "Find red"}),))
+    monkeypatch.setattr(testbed, "render_product_pages", lambda *_args: (page,))
+    monkeypatch.setattr(testbed, "prepare_product_page_grouped_choice_rollouts", lambda *_args: (pseudo,))
+    monkeypatch.setattr(testbed, "tokenize_real_prompts", lambda *_args: ((91, 92),))
+    monkeypatch.setattr(testbed, "required_max_logprobs", lambda *_args: 3)
+
+    def fake_sample(_engine, _tokenizer, prompt_ids, **kwargs):
+        calls.append(("sample", prompt_ids, kwargs["samples_per_page"]))
+        if kwargs["samples_per_page"] == 1:
+            return ((SampledAgentResponse("<think>shared</think><action>click[red]</action>", (7,)),),)
+        return ((SampledAgentResponse("<action>click[red]</action>", (8,)), SampledAgentResponse("<action>click[blue]</action>", (9,))),)
+
+    def fake_score(_engine, rollouts, **kwargs):
+        calls.append(("score", tuple(rollouts), kwargs["assistant_response_prefix_token_ids"]))
+        return [scores] * len(rollouts)
+
+    def fake_project(completions, *_args, **_kwargs):
+        calls.append(("project", tuple(completion.text for completion in completions)))
+        return None
+
+    def fake_result(*_args, **kwargs):
+        calls.append(("result", kwargs))
+        return {"source_page_index": 0}
+
+    monkeypatch.setattr(testbed, "sample_real_prompt_completions", fake_sample)
+    monkeypatch.setattr(testbed, "score_product_page_grouped_choice_rollouts", fake_score)
+    monkeypatch.setattr(testbed, "project_group_completions", fake_project)
+    monkeypatch.setattr(testbed, "build_group_result", fake_result)
+    monkeypatch.setattr(testbed, "summarize_group_results", lambda *_args, **_kwargs: {"groups_evaluated": 1})
+    monkeypatch.setattr(testbed, "write_report", lambda *_args: None)
+
+    args = build_argument_parser().parse_args(["--condition-pseudo-on-thinking", "--samples-per-page", "2", "--max-new-tokens", "20", "--output", str(tmp_path / "report.json")])
+    report = run_testbed(args)
+
+    thought_ids = tuple(range(len("<think>shared</think>")))
+    assert calls[0] == ("sample", ((91, 92),), 1)
+    assert calls[1] == ("sample", ((91, 92) + thought_ids,), 2)
+    assert calls[2][0] == "score" and calls[2][1] == (pseudo,)
+    assert calls[2][2] == [tuple(range(len("<think>shared\nThe best choice for the color group corresponds to the label:")))]
+    assert calls[3] == ("project", ("<think>shared</think><action>click[red]</action>", "<think>shared</think><action>click[blue]</action>"))
+    assert calls[4][1]["pseudo_probability_mode"] == "shared_page_thinking"
+    assert report["configuration"]["pseudo_probability_mode"] == "shared_page_thinking"
+
+
+def test_group_result_records_shared_thought_without_its_text():
+    page, pseudo, scores, empirical = _group_inputs()
+    prefix = GroupResponsePrefix("<think>private\nGroup cue:", (1, 2, 3), "generated_page_thinking", "complete_thinking_block")
     result = build_group_result(
         page,
         pseudo,
-        averaged,
+        scores,
         empirical,
         real_prompt_tokens=20,
         bootstrap_replicates=100,
         seed=3,
-        pseudo_probability_mode="mean_generated_thinking_for_empirical_denominator",
-        all_sample_scores=all_sample_average,
-        conditioned_records=records,
+        pseudo_probability_mode="shared_page_thinking",
+        shared_thinking_prefix=prefix,
+        shared_thinking_tokens=2,
     )
 
-    assert averaged.correct_probability == pytest.approx(0.75)
-    assert [record["included_in_empirical_denominator"] for record in records] == [True, False]
-    assert records[0]["projected_option_is_correct"] is True
-    assert records[1]["projected_label"] is None
     assert result["pseudo_correct_probability"] == pytest.approx(0.75)
-    assert result["pseudo_correct_probability_all_samples"] == pytest.approx(0.525)
-    assert result["denominator_conditioned_pseudo_probes"] == 1
-    assert result["complete_thinking_fraction"] == 1.0
+    assert result["shared_page_thinking"] == {"status": "complete_thinking_block", "empirical_prefix_tokens": 2, "pseudo_prefix_tokens": 3}
+    assert "private" not in json.dumps(result)
 
 
 def test_group_result_retains_multiple_correct_options_and_conditional_rates():
@@ -373,6 +401,3 @@ def test_none_is_unobservable_in_one_turn_and_click_comparison_is_conditioned():
     assert result["pseudo_correct_probability"] == pytest.approx(0.75)
     assert result["empirical_correct_probability_conditional"] == 0.5
     assert all(row["action"] != "none" for row in result["options"])
-    averaged = average_group_pseudo_rollout_scores(replace(pseudo, none_is_correct=True), [replace(scores, none_is_correct=True)])
-    assert averaged.none_is_correct
-    assert averaged.correct_probability == pytest.approx(0.875)
