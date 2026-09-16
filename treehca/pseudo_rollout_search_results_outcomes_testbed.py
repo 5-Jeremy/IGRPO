@@ -193,11 +193,13 @@ def collect_rollouts(
             "entered_full_reward_product_page": False,
             "first_full_reward_product_asin": None,
             "first_full_reward_product_step": None,
+            "entered_later_page_full_reward_product": False,
         }
         for index in range(samples_per_page)
     ]
     active = list(range(samples_per_page))
     product_eligibility_cache: dict[str, bool] = {}
+    forward_page_clicks = [0] * samples_per_page
     for step in range(max_steps):
         seeds = [seed + index * max_steps + step for index in active]
         responses = list(sample_responses([episodes[index].prompt for index in active], seeds))
@@ -224,11 +226,14 @@ def collect_rollouts(
             else:
                 previous_page_name = _page_name(episode.env)
                 receipt = episode.advance(action)
+                if previous_page_name == "search_results" and action == _NEXT_PAGE_ACTION and _page_name(episode.env) == "search_results":
+                    forward_page_clicks[index] += 1
                 step_record.update(raw_reward=receipt["raw_reward"], selected_options=receipt["selected_options"], observation=receipt["observation"])
                 record.update({key: receipt[key] for key in ("purchased", "full_reward", "raw_reward", "selected_options")})
                 entered_asin = _eligible_product_entry(episode.env, previous_page_name, product_eligibility_cache)
                 if entered_asin is not None and not record["entered_full_reward_product_page"]:
                     record.update(entered_full_reward_product_page=True, first_full_reward_product_asin=entered_asin, first_full_reward_product_step=step + 1)
+                    record["entered_later_page_full_reward_product"] = forward_page_clicks[index] > 0
                     step_record["entered_full_reward_product_page"] = True
                 if receipt["done"]:
                     record.update(
@@ -270,7 +275,7 @@ def _eligible_product_entry(env: Any, previous_page_name: str | None, eligibilit
     return asin if eligibility_cache[asin] else None
 
 
-def summarize_outcomes(trajectories: Sequence[dict[str, Any]], pseudo_probability: float, pseudo_product_entry_probability: float) -> dict[str, Any]:
+def summarize_outcomes(trajectories: Sequence[dict[str, Any]], pseudo_probability: float, pseudo_product_entry_probability: float, pseudo_later_page_product_entry_probability: float = 0.0) -> dict[str, Any]:
     """Compare pseudo and empirical product entry and full purchase success."""
     pseudo_probability = float(pseudo_probability)
     if not math.isfinite(pseudo_probability) or not 0 <= pseudo_probability <= 1:
@@ -278,9 +283,13 @@ def summarize_outcomes(trajectories: Sequence[dict[str, Any]], pseudo_probabilit
     pseudo_product_entry_probability = float(pseudo_product_entry_probability)
     if not math.isfinite(pseudo_product_entry_probability) or not 0 <= pseudo_product_entry_probability <= 1:
         raise ValueError("pseudo_product_entry_probability must be finite and in [0, 1]")
+    pseudo_later_page_product_entry_probability = float(pseudo_later_page_product_entry_probability)
+    if not math.isfinite(pseudo_later_page_product_entry_probability) or not 0 <= pseudo_later_page_product_entry_probability <= 1:
+        raise ValueError("pseudo_later_page_product_entry_probability must be finite and in [0, 1]")
     total = len(trajectories)
     successes = sum(record["purchased"] and record["raw_reward"] == 1.0 for record in trajectories)
     product_entries = sum(bool(record["entered_full_reward_product_page"]) for record in trajectories)
+    later_page_product_entries = sum(bool(record.get("entered_later_page_full_reward_product")) for record in trajectories)
     purchases = sum(record["purchased"] for record in trajectories)
     empirical_probability = successes / total if total else None
     empirical_product_entry_probability = product_entries / total if total else None
@@ -298,6 +307,9 @@ def summarize_outcomes(trajectories: Sequence[dict[str, Any]], pseudo_probabilit
         "empirical_full_reward_product_entry_probability": empirical_product_entry_probability,
         "empirical_full_reward_product_entry_wilson_95": list(_wilson_interval(product_entries, total)),
         "pseudo_full_reward_product_entry_probability": pseudo_product_entry_probability,
+        "later_page_full_reward_product_entry_count": later_page_product_entries,
+        "empirical_later_page_full_reward_product_entry_probability": later_page_product_entries / total if total else None,
+        "pseudo_later_page_full_reward_product_entry_probability": pseudo_later_page_product_entry_probability,
         "pseudo_minus_empirical_full_reward_product_entry_probability": pseudo_product_entry_probability - empirical_product_entry_probability if empirical_product_entry_probability is not None else None,
         "termination_counts": dict(Counter(record["termination_reason"] for record in trajectories)),
     }
@@ -357,6 +369,17 @@ def format_markdown_summary(report: dict[str, Any]) -> str:
                 f"- Root mean squared per-page product-entry gap: {probability(summary['page_root_mean_squared_full_reward_product_entry_gap'])}",
             ]
         )
+        if "later_page_product_entry_above_one_percent" in summary:
+            later = summary["later_page_product_entry_above_one_percent"]
+            lines.extend([
+                "",
+                "## Products beyond the starting results page",
+                "",
+                "Each probability sums full-reward-capable product entries on later results pages. A rollout counts when its first eligible product entry follows forward pagination. The threshold is strictly greater than 1%.",
+                "",
+                f"- Cumulative pseudo probability above 1%: {later['pseudo_count']} / {later['pages']} starting pages",
+                f"- Empirical probability above 1%: {later['empirical_count']} / {later['pages']} starting pages",
+            ])
     lines.extend(
         [
             "",
@@ -487,8 +510,9 @@ def _evaluate_start_shard(
                 "worker_rank": worker_rank,
                 "pseudo_success_probability": probabilities.success,
                 "pseudo_full_reward_product_entry_probability": probabilities.product_entry,
+                "pseudo_later_page_full_reward_product_entry_probability": probabilities.later_page_product_entry,
                 "trajectories": trajectories,
-                "outcomes": summarize_outcomes(trajectories, probabilities.success, probabilities.product_entry),
+                "outcomes": summarize_outcomes(trajectories, probabilities.success, probabilities.product_entry, probabilities.later_page_product_entry),
             }
         )
     metadata = {
@@ -722,6 +746,11 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
         "page_mean_pseudo_full_reward_product_entry_probability": float(np.mean([page["pseudo_full_reward_product_entry_probability"] for page in pages])),
         "page_mean_absolute_full_reward_product_entry_gap": float(np.mean(np.abs(product_entry_gaps))),
         "page_root_mean_squared_full_reward_product_entry_gap": float(np.sqrt(np.mean(np.square(product_entry_gaps)))),
+        "later_page_product_entry_above_one_percent": {
+            "pages": len(pages),
+            "pseudo_count": sum(page["outcomes"]["pseudo_later_page_full_reward_product_entry_probability"] > 0.01 for page in pages),
+            "empirical_count": sum(page["outcomes"]["empirical_later_page_full_reward_product_entry_probability"] > 0.01 for page in pages),
+        },
     }
     report["status"] = "complete"
     write_report(report, args.output)
@@ -737,7 +766,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-products", type=int, default=1000)
     parser.add_argument("--num-pages", type=int, default=20, help="Number of independent search-results starting states")
     parser.add_argument("--samples-per-page", type=int, default=256)
-    parser.add_argument("--path-probability-threshold", type=float, default=1e-6)
+    parser.add_argument("--path-probability-threshold", type=float, default=1e-3)
     parser.add_argument("--max-steps", type=int, default=14, help="Additional actions after the setup search; at most 14")
     parser.add_argument("--history-length", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)

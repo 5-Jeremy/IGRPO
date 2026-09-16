@@ -137,6 +137,7 @@ def test_sums_products_and_multiplies_forward_pagination(monkeypatch):
 
     assert probabilities.success == pytest.approx(0.2 * 0.5 + 0.3 * 0.5 * 0.5 + 0.5 * 0.4 * 0.75)
     assert probabilities.product_entry == pytest.approx(0.2 + 0.3 + 0.5 * 0.4)
+    assert probabilities.later_page_product_entry == pytest.approx(0.5 * 0.4)
     assert calls == ["A", "B", "C"]
     assert state.page_index == 0
     assert state.prompt == state.env.browser.current_url == "results:0"

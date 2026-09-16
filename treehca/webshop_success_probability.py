@@ -80,6 +80,7 @@ class SearchResultsProbabilities:
 
     product_entry: float
     success: float
+    later_page_product_entry: float = 0.0
 
 
 def _validate_probability(value: float, name: str) -> float:
@@ -300,10 +301,14 @@ def _estimate_search_results_probabilities(
     # Entry needs only results-page scores, so include even paths whose product
     # branches would be too small to expand for purchase scoring.
     entry_masses = []
+    later_page_entry_masses = []
     if include_product_entry:
         entry_page_probability = 1.0
         for page_index, page in enumerate(pages):
-            entry_masses.extend(entry_page_probability * result_probability(page_index, action) for action in page.correct_product_actions)
+            page_masses = [entry_page_probability * result_probability(page_index, action) for action in page.correct_product_actions]
+            entry_masses.extend(page_masses)
+            if page_index > 0:
+                later_page_entry_masses.extend(page_masses)
             if not page.has_next_page or not suffix_has_product[page_index + 1]:
                 break
             entry_page_probability *= result_probability(page_index, _NEXT_PAGE_ACTION)
@@ -369,6 +374,7 @@ def _estimate_search_results_probabilities(
     return SearchResultsProbabilities(
         product_entry=min(1.0, max(0.0, math.fsum(entry_masses))),
         success=min(1.0, max(0.0, math.fsum(terminal_masses))),
+        later_page_product_entry=min(1.0, max(0.0, math.fsum(later_page_entry_masses))),
     )
 
 

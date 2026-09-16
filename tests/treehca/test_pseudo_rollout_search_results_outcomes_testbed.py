@@ -66,6 +66,7 @@ def test_rollout_records_first_full_reward_product_entry(native_results_start):
     assert trajectory["first_full_reward_product_asin"] == selected.product["asin"]
     assert trajectory["first_full_reward_product_step"] == forward_clicks + 1
     assert trajectory["steps"][-1]["entered_full_reward_product_page"]
+    assert trajectory["entered_later_page_full_reward_product"] == (forward_clicks > 0)
     assert not trajectory["purchased"]
 
 
@@ -139,13 +140,13 @@ def test_forbidden_paths_match_pseudo_estimator_scope(monkeypatch):
 
 def test_outcome_summary_compares_unconditional_full_reward_probability():
     trajectories = [
-        {"purchased": True, "raw_reward": 1.0, "termination_reason": "purchase", "entered_full_reward_product_page": True},
+        {"purchased": True, "raw_reward": 1.0, "termination_reason": "purchase", "entered_full_reward_product_page": True, "entered_later_page_full_reward_product": True},
         {"purchased": True, "raw_reward": 0.5, "termination_reason": "purchase", "entered_full_reward_product_page": True},
         {"purchased": False, "raw_reward": 0.0, "termination_reason": "step_limit", "entered_full_reward_product_page": True},
         {"purchased": False, "raw_reward": 0.0, "termination_reason": "new_search", "entered_full_reward_product_page": False},
     ]
 
-    result = testbed.summarize_outcomes(trajectories, 0.4, 0.8)
+    result = testbed.summarize_outcomes(trajectories, 0.4, 0.8, 0.12)
 
     assert result["empirical_success_probability"] == 0.25
     assert result["pseudo_success_probability"] == 0.4
@@ -155,6 +156,9 @@ def test_outcome_summary_compares_unconditional_full_reward_probability():
     assert result["empirical_full_reward_product_entry_probability"] == 0.75
     assert result["pseudo_minus_empirical_full_reward_product_entry_probability"] == pytest.approx(0.05)
     assert result["termination_counts"] == {"purchase": 2, "step_limit": 1, "new_search": 1}
+    assert result["later_page_full_reward_product_entry_count"] == 1
+    assert result["empirical_later_page_full_reward_product_entry_probability"] == 0.25
+    assert result["pseudo_later_page_full_reward_product_entry_probability"] == 0.12
 
 
 def test_argument_defaults_limits_and_report_serialization(tmp_path):
@@ -162,7 +166,7 @@ def test_argument_defaults_limits_and_report_serialization(tmp_path):
     args = parser.parse_args([])
     testbed._validate_arguments(args)
     assert args.max_steps == 14
-    assert args.path_probability_threshold == 1e-6
+    assert args.path_probability_threshold == 1e-3
     assert args.data_parallel_size is None
     with pytest.raises(ValueError, match="at most 14"):
         testbed._validate_arguments(parser.parse_args(["--max-steps", "15"]))
@@ -245,7 +249,7 @@ def test_complete_testbed_orchestration_uses_same_start_and_default_horizon(nati
         seen["pseudo_prompt"] = state.prompt
         seen["threshold"] = threshold
         assert received_tokenizer is tokenizer
-        return SimpleNamespace(success=0.4, product_entry=0.6)
+        return SimpleNamespace(success=0.4, product_entry=0.6, later_page_product_entry=0.02)
 
     def collect(received_start, policy, **kwargs):
         seen["rollout_prompt"] = received_start.prompt
@@ -269,11 +273,13 @@ def test_complete_testbed_orchestration_uses_same_start_and_default_horizon(nati
 
     assert report["status"] == "complete" and report["pages_completed"] == 1
     assert seen["pseudo_prompt"] == seen["rollout_prompt"] == start.prompt
-    assert seen["max_steps"] == 14 and seen["threshold"] == 1e-6
+    assert seen["max_steps"] == 14 and seen["threshold"] == 1e-3
     assert seen["engine_kwargs"]["enable_prefix_caching"] is False
     assert report["pages"][0]["outcomes"]["empirical_success_probability"] == 0.5
     assert report["pages"][0]["pseudo_success_probability"] == 0.4
     assert report["pages"][0]["pseudo_full_reward_product_entry_probability"] == 0.6
     assert report["pages"][0]["outcomes"]["empirical_full_reward_product_entry_probability"] == 0.5
     assert report["summary"]["page_mean_absolute_gap"] == pytest.approx(0.1)
+    assert report["summary"]["later_page_product_entry_above_one_percent"] == {"pages": 1, "pseudo_count": 1, "empirical_count": 0}
+    assert "## Products beyond the starting results page" in output.with_suffix(".md").read_text()
     assert json.loads(output.read_text())["status"] == "complete"

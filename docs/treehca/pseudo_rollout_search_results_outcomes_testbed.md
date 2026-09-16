@@ -18,7 +18,7 @@ PYTHONPATH=. conda run --no-capture-output -n webshop \
   --num-pages 20 \
   --samples-per-page 256 \
   --max-steps 14 \
-  --path-probability-threshold 1e-6 \
+  --path-probability-threshold 1e-3 \
   --output pseudo_prob_test_results/search_results_outcomes.json
 ```
 
@@ -70,7 +70,7 @@ PYTHONPATH=. conda run --no-capture-output -n webshop \
 | `--num-pages` | 20 | Independent search-results starting states |
 | `--samples-per-page` | 256 | Native policy continuations cloned from each start |
 | `--max-steps` | 14 | Sampled actions after the setup search; values from 1 through 14 are accepted |
-| `--path-probability-threshold` | `1e-6` | Cumulative pseudo-path mass below which expansion stops |
+| `--path-probability-threshold` | `1e-3` | Cumulative pseudo-path mass below which expansion stops |
 | `--history-length` | 1 | Production prompt-memory window |
 | `--seed` | 0 | Goal selection, environment, rollout, and inference seeds |
 | `--max-prompt-length` | 4096 | Ordinary rollout prompt limit, with truncation treated as an error |
@@ -186,6 +186,13 @@ The Markdown companion shows the per-page comparison plus:
 
 The same pooled empirical rate, mean pseudo rate, mean absolute gap, and root
 mean squared gap are also reported for full-reward product entry.
+
+The Markdown report also counts starting pages where the cumulative pseudo
+probability of entering a full-reward-capable product on later results pages
+is strictly above 1%, and separately where the empirical rate is above 1%.
+Each empirical rollout counts only if its first qualifying product entry
+follows at least one forward results-page click. The JSON report stores both
+later-page probabilities per start and the aggregate counts.
 
 All starts receive the same number of rollouts by construction, so the pooled
 empirical rate gives every starting page equal weight.
