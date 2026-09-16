@@ -224,7 +224,7 @@ def write_plots(analysis: dict[str, Any], output_dir: Path, image_format: str = 
             [point["pseudo_correct_probability"] for point in nondecisive],
             [point["empirical_correct_probability"] for point in nondecisive],
             color="#c7c7c7",
-            alpha=0.28,
+            alpha=1.0,
             s=20,
             label="Not decisive",
         )

@@ -107,6 +107,16 @@ def _estimate(state, threshold):
     )
 
 
+def _estimate_both(state, threshold):
+    return estimator.estimate_search_results_probabilities(
+        state,
+        tokenizer=object(),
+        actor_rollout_wg=object(),
+        inference_engine=object(),
+        path_probability_threshold=threshold,
+    )
+
+
 def test_sums_products_and_multiplies_forward_pagination(monkeypatch):
     state = _FakeState(
         [
@@ -123,9 +133,10 @@ def test_sums_products_and_multiplies_forward_pagination(monkeypatch):
     }
     calls = _install_fakes(monkeypatch, state, probabilities, {"A": (0.5,), "B": (0.5, 0.5), "C": (0.75,)})
 
-    result = _estimate(state, 0.0)
+    probabilities = _estimate_both(state, 0.0)
 
-    assert result == pytest.approx(0.2 * 0.5 + 0.3 * 0.5 * 0.5 + 0.5 * 0.4 * 0.75)
+    assert probabilities.success == pytest.approx(0.2 * 0.5 + 0.3 * 0.5 * 0.5 + 0.5 * 0.4 * 0.75)
+    assert probabilities.product_entry == pytest.approx(0.2 + 0.3 + 0.5 * 0.4)
     assert calls == ["A", "B", "C"]
     assert state.page_index == 0
     assert state.prompt == state.env.browser.current_url == "results:0"
@@ -149,6 +160,9 @@ def test_prunes_small_prefix_but_keeps_completed_terminal_below_threshold(monkey
     # B is expanded at 0.3, then retained after its product factor lowers it to 0.03.
     assert result == pytest.approx(0.03)
     assert calls == ["B"]
+
+    # Entry still includes branches pruned from the more expensive purchase score.
+    assert _estimate_both(state, 0.25).product_entry == pytest.approx(0.2 + 0.3 + 0.5 * 0.4)
 
 
 def test_prefix_equal_to_threshold_is_expanded(monkeypatch):
@@ -199,6 +213,7 @@ def test_result_is_capped_and_optionless_products_have_conditional_mass_one(monk
     calls = _install_fakes(monkeypatch, state, probabilities, {"A": (), "B": ()})
 
     assert _estimate(state, 0.0) == 1.0
+    assert _estimate_both(state, 0.0).product_entry == 1.0
     # Empty grouped rollouts do not invoke the product scoring engine.
     assert calls == []
 
@@ -208,6 +223,7 @@ def test_no_correct_path_returns_zero_and_threshold_is_validated(monkeypatch):
     _install_fakes(monkeypatch, state, {}, {"X": (1.0,)})
 
     assert _estimate(state, 0.5) == 0.0
+    assert _estimate_both(state, 0.5).product_entry == 0.0
     with pytest.raises(ValueError, match="path_probability_threshold"):
         _estimate(state, 1.01)
 

@@ -74,6 +74,14 @@ class _ResultsPage:
     has_next_page: bool
 
 
+@dataclass(frozen=True)
+class SearchResultsProbabilities:
+    """Forward-path probabilities for eligible product entry and purchase."""
+
+    product_entry: float
+    success: float
+
+
 def _validate_probability(value: float, name: str) -> float:
     value = float(value)
     if not math.isfinite(value) or not 0.0 <= value <= 1.0:
@@ -243,26 +251,27 @@ def _product_success_probability(
     return math.prod(group_probabilities)
 
 
-def estimate_search_results_success_probability(
+def _estimate_search_results_probabilities(
     initial_state: ClonableWebshopState,
     tokenizer: Any,
     actor_rollout_wg: Any,
     inference_engine: Any,
     path_probability_threshold: float,
     *,
+    include_product_entry: bool,
     max_model_len: int | None = None,
     lora_request: Any = None,
-) -> float:
-    """Estimate the probability of a correct purchase without backtracking.
+) -> SearchResultsProbabilities:
+    """Estimate eligible-product entry and correct purchase without backtracking.
 
     Results-page action probabilities are raw answer-sequence probabilities.
     Product success is the product of the grouped correct-choice masses and is
     conditional on subsequently purchasing. A partial branch is expanded when
     its cumulative probability is at least ``path_probability_threshold``.
 
-    If pruning completes no product branch, one fallback path is followed by
-    greedily choosing the success-capable action with the greatest immediate
-    probability at each results page. The final sum is bounded to ``[0, 1]``.
+    Product-entry mass includes every forward results path, without product
+    option factors or threshold pruning. Purchase mass retains its threshold
+    and greedy fallback. Both final sums are bounded to ``[0, 1]``.
     """
     threshold = _validate_probability(path_probability_threshold, "path_probability_threshold")
     if not isinstance(initial_state.prompt, str):
@@ -287,6 +296,17 @@ def estimate_search_results_success_probability(
             logger.info("Scoring results page %d action %s", page_index + 1, action)
             result_probability_cache[key] = _results_action_probability(pages[page_index], action, tokenizer, actor_rollout_wg)
         return result_probability_cache[key]
+
+    # Entry needs only results-page scores, so include even paths whose product
+    # branches would be too small to expand for purchase scoring.
+    entry_masses = []
+    if include_product_entry:
+        entry_page_probability = 1.0
+        for page_index, page in enumerate(pages):
+            entry_masses.extend(entry_page_probability * result_probability(page_index, action) for action in page.correct_product_actions)
+            if not page.has_next_page or not suffix_has_product[page_index + 1]:
+                break
+            entry_page_probability *= result_probability(page_index, _NEXT_PAGE_ACTION)
 
     terminal_masses = []
     completed_paths = 0
@@ -346,4 +366,53 @@ def estimate_search_results_success_probability(
             terminal_masses.append(page_probability * conditional_probability)
             break
 
-    return min(1.0, max(0.0, math.fsum(terminal_masses)))
+    return SearchResultsProbabilities(
+        product_entry=min(1.0, max(0.0, math.fsum(entry_masses))),
+        success=min(1.0, max(0.0, math.fsum(terminal_masses))),
+    )
+
+
+def estimate_search_results_probabilities(
+    initial_state: ClonableWebshopState,
+    tokenizer: Any,
+    actor_rollout_wg: Any,
+    inference_engine: Any,
+    path_probability_threshold: float,
+    *,
+    max_model_len: int | None = None,
+    lora_request: Any = None,
+) -> SearchResultsProbabilities:
+    """Estimate eligible-product entry and purchase success in one search."""
+    return _estimate_search_results_probabilities(
+        initial_state,
+        tokenizer,
+        actor_rollout_wg,
+        inference_engine,
+        path_probability_threshold,
+        include_product_entry=True,
+        max_model_len=max_model_len,
+        lora_request=lora_request,
+    )
+
+
+def estimate_search_results_success_probability(
+    initial_state: ClonableWebshopState,
+    tokenizer: Any,
+    actor_rollout_wg: Any,
+    inference_engine: Any,
+    path_probability_threshold: float,
+    *,
+    max_model_len: int | None = None,
+    lora_request: Any = None,
+) -> float:
+    """Preserve the purchase-only estimator interface for existing callers."""
+    return _estimate_search_results_probabilities(
+        initial_state,
+        tokenizer,
+        actor_rollout_wg,
+        inference_engine,
+        path_probability_threshold,
+        include_product_entry=False,
+        max_model_len=max_model_len,
+        lora_request=lora_request,
+    ).success
