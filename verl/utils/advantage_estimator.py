@@ -15,3 +15,4 @@ class AdvantageEstimator(str, Enum):
     GiGPO = 'gigpo'
     IGPO = 'igpo'
     IGRPO = 'igrpo'
+    TREEHCA = 'treehca'

@@ -3,19 +3,26 @@ set -x
 ENGINE=${1:-vllm}
 
 train_data_size=256
-val_data_size=512
+val_data_size=1024
 group_size=5
 
-export CUDA_VISIBLE_DEVICES="0, 1, 2, 3"
+export CUDA_VISIBLE_DEVICES="0,1,2,3"
 export MASTER_PORT=29510
 
-TRAIN_DATA="$HOME/data/searchR1_processed_direct/train.parquet"
-VAL_DATA="$HOME/data/searchR1_processed_direct/test.parquet"
+DATA=${DATA:-/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO}
 
-MODEL_PATH="$HOME/data/Base_models/Qwen2.5-3B-Instruct"
-PROJECT_NAME="verl-agent"
-EXPERIMENT_NAME="igrpo-3B"
-DEBUG_DIR="${HOME}/IGRPO/tmp/debug_batches"
+TRAIN_DATA="$DATA/searchR1_processed_direct/train.parquet"
+# 1024 HotpotQA dev examples, not the full 51,713-row test split; see
+# examples/data_preprocess/make_val_subset.py
+VAL_DATA="$DATA/searchR1_processed_direct/val_subset.parquet"
+
+MODEL_PATH="$DATA/Base_models/Qwen2.5-3B-Instruct"
+PROJECT_NAME=${PROJECT_NAME:-ICLR}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-igrpo-3B}
+SEARCH_PORT=${SEARCH_PORT:-8008}
+# Checkpoints go to the project dir; /scratch/user is quota'd at 1 TB.
+RUN_DIR=${RUN_DIR:-$DATA/runs/$PROJECT_NAME/$EXPERIMENT_NAME}
+DEBUG_DIR=${DEBUG_DIR:-$RUN_DIR/debug_batches}
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=igrpo \
@@ -66,16 +73,17 @@ python3 -m verl.trainer.main_ppo \
     env.max_steps=4 \
     env.rollout.n=$group_size \
     env.history_length=4 \
-    env.search.search_url='http://127.0.0.1:8008/retrieve' \
+    env.search.search_url="http://127.0.0.1:${SEARCH_PORT}/retrieve" \
+    ray_init.num_cpus=${RAY_NUM_CPUS:-32} \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
-    trainer.default_local_dir="./checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}" \
+    trainer.default_local_dir="${RUN_DIR}/checkpoints" \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
-    trainer.save_freq=25 \
-    trainer.test_freq=50 \
+    trainer.save_freq=50 \
+    trainer.test_freq=10 \
     trainer.debug_freq=10 \
     trainer.debug_dir=$DEBUG_DIR \
     trainer.total_epochs=1 \
