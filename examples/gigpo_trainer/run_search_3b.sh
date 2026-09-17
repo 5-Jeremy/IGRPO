@@ -1,13 +1,25 @@
 set -x
 
+# GiGPO on search with Qwen2.5-3B-Instruct, configured as a matched baseline
+# against examples/igrpo_trainer/run_search.sh and examples/igpo_trainer/run_search.sh:
+# same model, data, group size, ppo batch sizes, GPU count and retriever port.
+# Only the advantage estimator and its own hyperparameters differ.
+#
+# run_search.sh in this directory is the upstream 7B recipe and is left alone.
+
 ENGINE=${1:-vllm}
 
 train_data_size=256
 val_data_size=1024
 group_size=5
 
+# GiGPO config
+mode="mean_std_norm" # "mean_norm" or "mean_std_norm"
+enable_similarity=True # enable similarity-based GiGPO
+similarity_thresh=0.9 # similarity threshold for GiGPO
+
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
-export MASTER_PORT=29510
+export MASTER_PORT=29512
 
 DATA=${DATA:-/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO}
 
@@ -18,17 +30,18 @@ VAL_DATA="$DATA/searchR1_processed_direct/val_subset.parquet"
 
 MODEL_PATH="$DATA/Base_models/Qwen2.5-3B-Instruct"
 PROJECT_NAME=${PROJECT_NAME:-ICLR}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-igpo-3B}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-gigpo-3B}
 SEARCH_PORT=${SEARCH_PORT:-8008}
 # Checkpoints go to the project dir; /scratch/user is quota'd at 1 TB.
 RUN_DIR=${RUN_DIR:-$DATA/runs/$PROJECT_NAME/$EXPERIMENT_NAME}
-DEBUG_DIR=${DEBUG_DIR:-$RUN_DIR/debug_batches}
 
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=igpo \
-    algorithm.gamma=1.0 \
-    algorithm.igpo.prob_diff_mode=True \
-    algorithm.igpo.use_think=False \
+    algorithm.adv_estimator=gigpo \
+    algorithm.gamma=0.95 \
+    algorithm.gigpo.step_advantage_w=1.0 \
+    algorithm.gigpo.mode=$mode \
+    algorithm.gigpo.enable_similarity=$enable_similarity \
+    algorithm.gigpo.similarity_thresh=$similarity_thresh \
     data.train_files=$TRAIN_DATA \
     data.val_files=$VAL_DATA \
     data.train_batch_size=$train_data_size \
@@ -79,8 +92,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=50 \
     trainer.test_freq=10 \
-    trainer.debug_freq=10 \
-    trainer.debug_dir=$DEBUG_DIR \
     trainer.total_epochs=1 \
     trainer.max_actor_ckpt_to_keep=3 \
     trainer.max_critic_ckpt_to_keep=3 \

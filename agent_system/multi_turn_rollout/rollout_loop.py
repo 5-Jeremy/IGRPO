@@ -742,7 +742,8 @@ class TrajectoryCollector:
         """
         if is_train:
             gen_batch = gen_batch.repeat(repeat_times=self.config.env.rollout.n, interleave=True)
-        tree_structure_traj = self.config.algorithm.adv_estimator == AdvantageEstimator.IGRPO and is_train
+        # TreeHCA branches exactly like IGRPO and only differs in credit assignment
+        tree_structure_traj = self.config.algorithm.adv_estimator in (AdvantageEstimator.IGRPO, AdvantageEstimator.TREEHCA) and is_train
             
         # Initial observations from the environment
         if tree_structure_traj:

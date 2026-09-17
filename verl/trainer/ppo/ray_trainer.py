@@ -62,6 +62,7 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.async_server import AsyncLLMServerManager
 from gigpo import core_gigpo
 from igpo import core_igpo
+from treehca import core_treehca
 from verl.utils.advantage_estimator import AdvantageEstimator
 from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 
@@ -308,6 +309,27 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.TREEHCA:
+        advantages, returns, treehca_metrics = core_treehca.compute_treehca_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+            uid=data.non_tensor_batch["uid"],
+            node_uid=data.non_tensor_batch["node_uid"],
+            parent_node_uid=data.non_tensor_batch["parent_node_uid"],
+            is_terminal=data.non_tensor_batch["is_terminal"],
+            info_gain_sum=data.non_tensor_batch["info_gain_sum"],
+            traj_step=data.non_tensor_batch["traj_step"],
+            prob_diff_mode=kwargs.get("treehca_prob_diff_mode", True),
+            prob_floor=kwargs.get("treehca_prob_floor", 1e-6),
+            weight_temp=kwargs.get("treehca_weight_temp", 1.0),
+            max_weight_ratio=kwargs.get("treehca_max_weight_ratio", -1.0),
+            subtree_size_weight=kwargs.get("treehca_subtree_size_weight", True),
+            leaf_baseline=kwargs.get("treehca_leaf_baseline", "group"),
+            norm_adv_by_std=kwargs.get("treehca_norm_adv_by_std", True),
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+        data.meta_info["treehca_metrics"] = treehca_metrics
     elif adv_estimator == AdvantageEstimator.GRPO:
         # TODO: test on more adv estimator type
         grpo_calculation_mask = data.batch["response_mask"]
@@ -492,6 +514,7 @@ class RayPPOTrainer:
             AdvantageEstimator.GiGPO,
             AdvantageEstimator.IGPO,
             AdvantageEstimator.IGRPO,
+            AdvantageEstimator.TREEHCA,
         ]:
             self.use_critic = False
         else:
@@ -610,6 +633,12 @@ class RayPPOTrainer:
         if config.actor_rollout_ref.rollout.multi_turn.enable:
             assert config.actor_rollout_ref.rollout.multi_turn.tool_config_path is not None, "tool_config_path must be set when enabling multi_turn with tool, due to no role-playing support"
             assert config.algorithm.adv_estimator in [AdvantageEstimator.GRPO], "only GRPO is tested for multi-turn with tool"
+
+        # TreeHCA walks the rollout tree bottom-up, so it needs one row per node
+        if config.algorithm.adv_estimator == AdvantageEstimator.TREEHCA:
+            assert config.reward_model.reward_manager == "tree_structure", "TreeHCA requires reward_model.reward_manager='tree_structure'"
+            assert config.algorithm.igrpo.reward_mode in ["avg", "max"], "TreeHCA requires algorithm.igrpo.reward_mode in ['avg', 'max']; 'full' unrolls the tree into root-to-leaf chains"
+            assert config.algorithm.treehca.leaf_baseline in ["group", "none"], f"Invalid treehca.leaf_baseline: {config.algorithm.treehca.leaf_baseline}"
 
         print("[validate_config] All configuration checks passed successfully!")
 
@@ -1184,7 +1213,7 @@ class RayPPOTrainer:
 
                     with _timer("reward", timing_raw):
                         # compute reward model score
-                        if self.config.algorithm.adv_estimator == AdvantageEstimator.IGRPO:
+                        if self.config.algorithm.adv_estimator in [AdvantageEstimator.IGRPO, AdvantageEstimator.TREEHCA]:
                             assert not self.use_rm and not self.config.reward_model.launch_reward_fn_async
 
                         if self.use_rm:
@@ -1314,8 +1343,16 @@ class RayPPOTrainer:
                             batch_debug_freq=self.config.trainer.debug_freq,
                             batch_debug_think=self.config.algorithm.igpo.use_think,
                             batch_debug_experiment_name=self.config.trainer.experiment_name,
-                            debug_dir=self.config.trainer.debug_dir
+                            debug_dir=self.config.trainer.debug_dir,
+                            treehca_prob_diff_mode=self.config.algorithm.igrpo.prob_diff_mode,
+                            treehca_prob_floor=self.config.algorithm.treehca.prob_floor,
+                            treehca_weight_temp=self.config.algorithm.treehca.weight_temp,
+                            treehca_max_weight_ratio=self.config.algorithm.treehca.max_weight_ratio,
+                            treehca_subtree_size_weight=self.config.algorithm.treehca.subtree_size_weight,
+                            treehca_leaf_baseline=self.config.algorithm.treehca.leaf_baseline,
+                            treehca_norm_adv_by_std=self.config.algorithm.treehca.norm_adv_by_std,
                         )
+                        metrics.update(batch.meta_info.pop("treehca_metrics", {}))
                         self.debug_batch_instance(batch, "after_adv")
                     # update critic
                     if self.use_critic:
@@ -1382,7 +1419,7 @@ class RayPPOTrainer:
                 progress_bar.update(1)
                 # Change after saving checkpoints
                 if (
-                    self.config.algorithm.adv_estimator == AdvantageEstimator.IGRPO
+                    self.config.algorithm.adv_estimator in [AdvantageEstimator.IGRPO, AdvantageEstimator.TREEHCA]
                     and self.config.algorithm.igrpo.reduce_expand_num_per_steps_num > 0
                     and self.config.algorithm.igrpo.max_traj_to_expand_per_node > 0 
                 ):

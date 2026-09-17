@@ -258,6 +258,13 @@ algorithm:
     prob_diff_mode: True
     stable_steps: 150 # more stable
     stable_method: "normal" # normal: add cummulative info gain; threshold: >=0.5-->1.0
+  treehca: # TreeHCA reuses the igrpo block above for branching, these knobs only affect credit assignment
+    prob_floor: 1.0e-6 # clamp p_gt before inverting it
+    weight_temp: 1.0 # w_c = (1 / p_gt(c)) ** weight_temp
+    max_weight_ratio: -1.0 # truncate w_c at this multiple of the mean sibling weight; -1 disables
+    subtree_size_weight: True # scale w_c by the leaf count under child c, matching IGRPO's flat mean over subtree leaves
+    leaf_baseline: group # group: GRPO-style baseline over the leaves of a prompt group; none: raw outcome score
+    norm_adv_by_std: True # only used when leaf_baseline == group
   igpo:
     prob_diff_mode: True
     use_think: False # whether to use the <think> content in IGPO

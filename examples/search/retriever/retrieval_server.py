@@ -1,4 +1,5 @@
 import json
+import threading
 import warnings
 from typing import List, Optional
 import argparse
@@ -309,6 +310,12 @@ class QueryRequest(BaseModel):
 
 app = FastAPI()
 
+# FastAPI runs this sync endpoint in a threadpool and the rollout workers issue
+# up to 256 concurrent queries, but faiss StandardGpuResources is not thread
+# safe: concurrent searches free its temp-memory stack out of order and trip
+# "Faiss assertion 'p + size == head_' failed". Serialise the searches.
+_search_lock = threading.Lock()
+
 
 @app.post("/retrieve")
 def retrieve_endpoint(request: QueryRequest):
@@ -326,9 +333,11 @@ def retrieve_endpoint(request: QueryRequest):
 
     # Perform retrieval
     if request.return_scores:
-        results, scores = retriever.search(query=request.query, num=request.topk, return_score=True)
+        with _search_lock:
+            results, scores = retriever.search(query=request.query, num=request.topk, return_score=True)
     else:
-        results = retriever.search(query=request.query, num=request.topk, return_score=False)
+        with _search_lock:
+            results = retriever.search(query=request.query, num=request.topk, return_score=False)
         scores = None
 
     # Format response

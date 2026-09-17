@@ -1,9 +1,10 @@
-save_path=$HOME/data/searchR1
+DATA=${DATA:-/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO}
+save_path=$DATA/searchR1
 
 index_file=$save_path/e5_Flat.index
 corpus_file=$save_path/wiki-18.jsonl
 retriever_name=e5
-retriever_path=intfloat/e5-base-v2
+retriever_path=$DATA/Base_models/e5-base-v2
 
 export CUDA_VISIBLE_DEVICES="4"
 
