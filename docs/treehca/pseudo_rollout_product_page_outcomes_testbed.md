@@ -66,6 +66,7 @@ not empirical policy estimates or pseudo probabilities.
 | --- | ---: | --- |
 | `--num-pages` | 20 | Distinct sampled products, each paired with one generated query |
 | `--samples-per-page` | 256 | Independent continuations of exactly the same starting state |
+| `--condition-pseudo-on-thinking` | off | Sample one thought per page and share it across first empirical actions and grouped pseudo probes |
 | `--count_partial_reward` | off | Replace headline full-credit rates with positive-reward rates and integrate pseudo mass over positive-reward combinations |
 | `--max-steps` | 13 | Additional actions; positive values up to 13 are allowed |
 | `--history-length` | 2 | Production memory window; must be positive |
@@ -82,9 +83,21 @@ not empirical policy estimates or pseudo probabilities.
 `--catalog` and `--attributes` override the default 1,000-product files. Use a
 matching native index size with `--num-products`. vLLM also accepts the usual
 `--tensor-parallel-size`, `--gpu-memory-utilization`, `--dtype`, and
-`--trust-remote-code` options exposed by this CLI. There is no generated-thinking
-conditioning mode in this testbed: the pseudo measurement uses the existing
-grouped testbed's deterministic assistant cue.
+`--trust-remote-code` options exposed by this CLI.
+
+With `--condition-pseudo-on-thinking`, the policy first samples one complete
+`<think>...</think>` block for each starting product page. Every empirical
+trajectory on that page starts after those thought tokens and samples its first
+action. The completed thought is restored before WebShop projects the response.
+After that action, the environment advances and subsequent actions are sampled
+normally from the new observations. Every group pseudo probe on the page uses
+the same thought, replacing its closing tag with the group decision cue. The
+report records prefix token counts and the `shared_page_thinking` mode without
+storing generated thought text. If a candidate does not produce a complete
+thought within `--max-new-tokens`, it is recorded in
+`sampling.thinking_rejections` and replaced by the next oracle-valid product.
+The run stops with a count only if the candidate pool cannot supply the
+requested number of complete-thought pages.
 
 ## 1. Sample the queries and matching products
 
@@ -105,6 +118,13 @@ continuations use these same product records, goals, and prices.
 4. Preserve the **exact** selected goal, including attributes, price bound, and
    option mapping. Ambiguous identical instructions with conflicting option
    mappings raise an error.
+
+Candidates are considered in that deterministic order. If the native oracle
+cannot earn full reward for a candidate, the testbed records its ASIN, goal
+options, and oracle receipt in `sampling.oracle_rejections`, then considers the
+next product. It continues until `--num-pages` valid starts are collected or
+the candidate pool is exhausted. Accepted pages receive contiguous source
+indices; a rejected candidate is never used for inference.
 
 This follows the other testbeds' product-stratified sampling, rather than
 sampling instructions uniformly. All generated synthetic goals are candidates;
@@ -158,9 +178,10 @@ history while retaining the product-selection step.
 
 `validate_full_reward` clones the start, clicks the goal option values, and
 clicks `buy now`. The actual environment must report a purchase with raw reward
-**exactly 1.0**. Otherwise the run stops and reports the native reward and chosen
-options; it does not change the reward function, repair a goal, discard the
-failure silently, or substitute fuzzy option correctness for native reward.
+**exactly 1.0**. A candidate that fails this check is recorded and replaced by
+the next candidate. If too few candidates pass, the run stops with the number
+accepted and examined. The testbed does not change the reward function, repair
+a goal, or substitute fuzzy option correctness for native reward.
 
 This verifies the product, attributes, price, and option combination together.
 The oracle's receipt and reward components are saved for each page. Its actions
@@ -562,14 +583,17 @@ post-click prompt is also included in the example JSON.
 
 ## Outputs and verification
 
-`--output` writes a schema-version-2 atomic JSON report and same-stem Markdown
+`--output` writes an atomic JSON report and same-stem Markdown
 probability and expected-reward comparison tables. The JSON contains
 `configuration` (including `count_partial_reward`), `sampling`, `pages`, and, after all
 pages complete, `summary`. Each page contains the exact goal and price, setup
 observations/prompts, oracle receipt, group probe prompts/probabilities,
 trajectories, and outcome statistics. Each trajectory includes its termination
 reason, final options, raw reward, and step records with seeds, projected
-actions, format-validity flags, execution flags, and native observations.
+actions, format-validity flags, execution flags, native observations, and the
+actual description/features section reached after each action. The
+default report uses schema version 2; conditioned reports use version 3 and add
+`shared_page_thinking` metadata on each page.
 
 The Markdown also includes a first-turn termination table for each ASIN, showing
 counts and percentages of **all rollouts for that ASIN**:
@@ -595,6 +619,32 @@ are optional because they repeat substantial text. A checkpoint is written
 after each completed page. `status: running` and `pages_completed` identify a
 partial inference report; `status: complete` means all requested work for the
 reported mode finished. Checkpoints are diagnostic, not automatic resume files.
+
+Analyze a completed report with:
+
+```bash
+PYTHONPATH=. conda run --no-capture-output -n webshop \
+  python -m treehca.analyze_pseudo_rollout_product_page_outcomes_results \
+  pseudo_prob_test_results/product_page_outcomes.json
+```
+
+The analyzer accepts default schema-version-2 and shared-thinking
+schema-version-3 reports. It compares the selected pseudo reward probability
+with empirical reward rates among all rollouts and among purchases, and writes
+`analysis_summary.json` and `analysis_summary.md` beside the report in a
+same-stem directory. The summary retains the pseudo conditioning mode and
+the full- or partial-reward event used by the report. It excludes pages with
+no purchases only from the purchase-conditioned comparison.
+
+The analysis Markdown also has one row per ASIN with the number of choice
+groups, rollout count, the four percentages from the testbed's first table,
+and description/features visit rates among correct empirical rollouts. A
+correct rollout means a full-reward purchase by default or a positive-reward
+purchase with `--count-partial-reward`. Each rollout counts at most once for
+each page type, even if it visits repeatedly. A zero-correct page shows `n/a`
+for both visit rates. New reports use the actual native page reached after
+each action; older reports infer visits from executed description/features
+clicks, and the analysis JSON marks that inference.
 
 The focused test suite uses actual native environments for isolation, oracle
 purchases, partial purchases, all exit paths, detail-page return behavior,

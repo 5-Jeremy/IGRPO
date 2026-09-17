@@ -25,6 +25,106 @@ def response(action):
     return f"<think>Choose the next action.</think><action>{action}</action>"
 
 
+def test_unreachable_oracle_start_is_replaced_without_resampling_prior_candidates(monkeypatch):
+    items = [testbed.SelectedProductGoal({"asin": asin}, {"goal_options": {"color": asin}}) for asin in "ABCD"]
+    server = SimpleNamespace(all_products=[item.product for item in items], goals=[item.goal for item in items], product_prices={asin: 1 for asin in "ABCD"})
+    sampled_budgets = []
+    constructed = []
+
+    def sample(_products, _goals, num_pages, _seed):
+        sampled_budgets.append(num_pages)
+        return tuple(items[:num_pages])
+
+    def construct(_server, item, **_kwargs):
+        constructed.append(item.product["asin"])
+        return SimpleNamespace(setup={"real_prompt": item.product["asin"]}, asin=item.product["asin"])
+
+    def oracle(start, _options):
+        return {"full_reward": start.asin != "B", "raw_reward": 1.0 if start.asin != "B" else 0.5}
+
+    monkeypatch.setattr(testbed, "sample_diverse_product_goals", sample)
+    monkeypatch.setattr(testbed, "construct_start_episode", construct)
+    monkeypatch.setattr(testbed, "validate_full_reward", oracle)
+
+    starts, pages, sampler = testbed.select_reachable_start_pages(server, num_pages=3, seed=7, history_length=2, results_size=10)
+
+    assert sampled_budgets == [3, 4]
+    assert constructed == list("ABCD")
+    assert [start.asin for start in starts] == list("ACD")
+    assert [page["source_page_index"] for page in pages] == [0, 1, 2]
+    assert [page["asin"] for page in pages] == list("ACD")
+    assert sampler.oracle_rejections == [{"asin": "B", "candidate_position": 1, "goal_options": {"color": "B"}, "oracle": {"full_reward": False, "raw_reward": 0.5}}]
+
+
+def test_incomplete_thought_page_is_replaced_and_reindexed():
+    starts = [SimpleNamespace(prompt="first"), SimpleNamespace(prompt="second")]
+    pages = [{"source_page_index": 0, "asin": "A"}, {"source_page_index": 1, "asin": "B"}]
+    replacement = (SimpleNamespace(prompt="third"), {"asin": "C"})
+
+    class Sampler:
+        calls = 0
+
+        def next_start(self):
+            self.calls += 1
+            return replacement
+
+    class Tokenizer:
+        def encode(self, text, **_kwargs):
+            return list(range(len(text)))
+
+    calls = []
+
+    def policy(prompts, seeds):
+        calls.append((prompts, seeds))
+        if len(prompts) == 2:
+            return ["<think>unfinished", "<think>keep</think><action>click[x]</action>"]
+        return ["<think>replacement</think><action>click[y]</action>"]
+
+    sampler = Sampler()
+    accepted_starts, accepted_pages, thoughts, rejected = testbed.sample_shared_page_thoughts(starts, pages, sampler, policy, Tokenizer(), seed=3, max_new_tokens=20)
+
+    assert [start.prompt for start in accepted_starts] == ["second", "third"]
+    assert [page["source_page_index"] for page in accepted_pages] == [0, 1]
+    assert [page["asin"] for page in accepted_pages] == ["B", "C"]
+    assert [thoughts[index].text for index in range(2)] == ["<think>keep</think>", "<think>replacement</think>"]
+    assert rejected == [{"asin": "A", "reason": "no complete thought within max_new_tokens=20"}]
+    assert sampler.calls == 1
+    assert calls == [(["first", "second"], [5_003, 5_004]), (["third"], [5_005])]
+
+
+def test_incomplete_thought_replacement_reports_candidate_exhaustion():
+    class Sampler:
+        def next_start(self):
+            raise StopIteration
+
+    class Tokenizer:
+        def encode(self, text, **_kwargs):
+            return list(range(len(text)))
+
+    with pytest.raises(ValueError, match="Only 0 of 1 requested pages produced complete thoughts after 1 thought attempts"):
+        testbed.sample_shared_page_thoughts(
+            [SimpleNamespace(prompt="first")], [{"asin": "A"}], Sampler(),
+            lambda _prompts, _seeds: ["<think>unfinished"], Tokenizer(), seed=0, max_new_tokens=20,
+        )
+
+
+def test_unreachable_oracle_candidates_report_exhaustion(monkeypatch):
+    item = testbed.SelectedProductGoal({"asin": "A"}, {"goal_options": {"color": "A"}})
+    server = SimpleNamespace(all_products=[item.product], goals=[item.goal], product_prices={"A": 1})
+
+    def sample(_products, _goals, num_pages, _seed):
+        if num_pages > 1:
+            raise ValueError(f"Requested {num_pages} pages, but only 1 parser-compatible products with generated training goals are available")
+        return (item,)
+
+    monkeypatch.setattr(testbed, "sample_diverse_product_goals", sample)
+    monkeypatch.setattr(testbed, "construct_start_episode", lambda *_args, **_kwargs: SimpleNamespace(asin="A", setup={}))
+    monkeypatch.setattr(testbed, "validate_full_reward", lambda *_args: {"full_reward": False, "raw_reward": 0.5})
+
+    with pytest.raises(ValueError, match="Only 0 of 1 requested pages have full native reward"):
+        testbed.select_reachable_start_pages(server, num_pages=1, seed=0, history_length=2, results_size=10)
+
+
 def test_start_is_native_product_click_with_training_history_and_empty_options(native_start):
     start, selected = native_start
     from web_agent_site.envs.web_agent_text_env import WebAgentTextEnv
@@ -113,7 +213,17 @@ def test_prev_from_description_returns_to_product_and_does_not_terminate(native_
     trajectories = testbed.collect_rollouts(start, lambda prompts, seeds: [response(script[seeds[0]])], samples_per_page=1)
     assert trajectories[0]["termination_reason"] == "purchase"
     assert trajectories[0]["full_reward"]
+    assert trajectories[0]["steps"][0]["product_subpage_after_action"] == "description"
+    assert trajectories[0]["steps"][1]["product_subpage_after_action"] is None
     assert trajectories[0]["steps"][1]["executed"]
+
+
+def test_features_visit_records_actual_native_subpage(native_start):
+    start, _ = native_start
+    trajectories = testbed.collect_rollouts(start, lambda _prompts, _seeds: [response("click[features]")], samples_per_page=1, max_steps=1)
+    assert trajectories[0]["steps"][0]["product_subpage_after_action"] == "features"
+    assert testbed.product_subpage_from_url("http://example/item_sub_page/session/ASIN/query/1/Description/{}") == "description"
+    assert testbed.product_subpage_from_url("http://example/item_page/session/ASIN/query/1") is None
 
 
 def test_malformed_response_can_still_purchase_as_in_training(native_start):
@@ -194,6 +304,8 @@ def test_vllm_policy_uses_training_tokenization_and_preserves_seeds_across_batch
     assert engine.calls[0]["sampling_params"][0].top_p == 1
     assert engine.calls[0]["sampling_params"][0].top_k == -1
     assert not hasattr(engine.calls[0]["sampling_params"][0], "allowed_token_ids")
+    assert policy(["1"], [81], assistant_prefix_token_ids=(7, 8)) == ["81"]
+    assert engine.calls[-1]["prompts"] == [{"prompt_token_ids": [1, 99, 7, 8]}]
     with pytest.raises(ValueError, match="exceeds max_model_len"):
         testbed.VllmPolicy(engine, Tokenizer(), args, 5)(["1"], [1])
 
@@ -203,6 +315,8 @@ def test_argument_limits_and_defaults():
     args = parser.parse_args([])
     testbed._validate_arguments(args)
     assert args.max_steps == 13 and args.history_length == 2
+    assert not args.condition_pseudo_on_thinking
+    assert parser.parse_args(["--condition-pseudo-on-thinking"]).condition_pseudo_on_thinking
     assert args.max_prompt_length == 4096 and args.max_new_tokens == 512
     for arguments in (["--max-steps", "14"], ["--history-length", "0"], ["--results-size", "1"], ["--temperature", "0"], ["--top-p", "nan"]):
         with pytest.raises(ValueError):
@@ -220,7 +334,8 @@ def test_report_serialization_and_markdown(tmp_path):
 
 
 @pytest.mark.parametrize("count_partial", [False, True])
-def test_complete_testbed_with_native_environments_cached_tokenizer_and_fake_logits(native_start, monkeypatch, tmp_path, count_partial):
+@pytest.mark.parametrize("condition_on_thinking", [False, True])
+def test_complete_testbed_with_native_environments_cached_tokenizer_and_fake_logits(native_start, monkeypatch, tmp_path, count_partial, condition_on_thinking):
     import math
 
     from transformers import AutoTokenizer
@@ -230,10 +345,15 @@ def test_complete_testbed_with_native_environments_cached_tokenizer_and_fake_log
     actions = [f"click[{value}]" for value in selected.goal["goal_options"].values()] + ["click[buy now]"]
 
     class Engine:
+        instance = None
+
         def __init__(self, **kwargs):
+            Engine.instance = self
             self.llm_engine = SimpleNamespace(model_config=SimpleNamespace(max_model_len=8192, max_logprobs=kwargs["max_logprobs"]))
+            self.calls = []
 
         def generate(self, prompts, sampling_params, **kwargs):
+            self.calls.append((prompts, sampling_params))
             outputs = []
             for params in sampling_params:
                 if hasattr(params, "allowed_token_ids"):
@@ -241,7 +361,13 @@ def test_complete_testbed_with_native_environments_cached_tokenizer_and_fake_log
                     completion = SimpleNamespace(token_ids=[params.allowed_token_ids[0]], logprobs=[logprobs])
                 else:
                     step = (params.seed - 10_000) % 13
-                    completion = SimpleNamespace(token_ids=tokenizer.encode(response(actions[step]), add_special_tokens=False))
+                    if condition_on_thinking and 5_000 <= params.seed < 10_000:
+                        text = "<think>shared plan</think><action>click[buy now]</action>"
+                    elif condition_on_thinking and step == 0:
+                        text = f"<action>{actions[step]}</action>"
+                    else:
+                        text = response(actions[step])
+                    completion = SimpleNamespace(token_ids=tokenizer.encode(text, add_special_tokens=False))
                 outputs.append(SimpleNamespace(outputs=[completion]))
             return outputs
 
@@ -249,7 +375,7 @@ def test_complete_testbed_with_native_environments_cached_tokenizer_and_fake_log
     monkeypatch.setattr(testbed, "_configure_vllm_engine", lambda: None)
     monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda *args, **kwargs: tokenizer)
     monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(SamplingParams=lambda **kwargs: SimpleNamespace(**kwargs), LLM=Engine))
-    flags = ["--count_partial_reward"] if count_partial else []
+    flags = (["--count_partial_reward"] if count_partial else []) + (["--condition-pseudo-on-thinking"] if condition_on_thinking else [])
     args = testbed.build_argument_parser().parse_args(["--num-pages", "1", "--samples-per-page", "3", "--output", str(tmp_path / "report.json"), *flags])
     report = testbed.run_testbed(args)
     assert report["status"] == "complete" and report["pages_completed"] == 1
@@ -259,7 +385,27 @@ def test_complete_testbed_with_native_environments_cached_tokenizer_and_fake_log
     assert page["outcomes"]["pseudo_all_correct_probability"] == pytest.approx(math.prod(group["correct_probability"] for group in page["groups"]))
     assert all("already taken 2 step(s)" in group["prompt"] for group in page["groups"])
     assert len(page["groups"]) == len(selected.product["options"])
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == (3 if condition_on_thinking else 2)
+    if condition_on_thinking:
+        thought_ids = tokenizer.encode("<think>shared plan</think>", add_special_tokens=False)
+        generated = [(prompt, params) for prompts, params_rows in Engine.instance.calls for prompt, params in zip(prompts, params_rows) if not hasattr(params, "allowed_token_ids")]
+        assert sum(params.seed == 5_000 for _, params in generated) == 1
+        first_actions = [prompt for prompt, params in generated if params.seed >= 10_000 and (params.seed - 10_000) % 13 == 0]
+        assert len(first_actions) == args.samples_per_page
+        assert all(prompt["prompt_token_ids"][-len(thought_ids) :] == thought_ids for prompt in first_actions)
+        assert page["shared_page_thinking"]["status"] == "complete_thinking_block"
+        assert all(group["assistant_response_prefix_source"] == "generated_page_thinking" for group in page["groups"])
+        assert all("assistant_response_prefix" not in group for group in page["groups"])
+        pseudo_prompts = [prompt for prompts, params_rows in Engine.instance.calls for prompt, params in zip(prompts, params_rows) if hasattr(params, "allowed_token_ids")]
+        for group, prompt in zip(page["groups"], pseudo_prompts):
+            prefix_text = f"<think>shared plan\nThe best choice for the {group['group_name']} group corresponds to the label:"
+            prefix_ids = tokenizer.encode(prefix_text, add_special_tokens=False)
+            assert prompt["prompt_token_ids"][-len(prefix_ids) :] == prefix_ids
+        assert report["configuration"]["pseudo_probability_mode"] == "shared_page_thinking"
+        assert page["trajectories"][0]["steps"][0]["format_valid"]
+        assert page["trajectories"][0]["steps"][1]["training_step"] == 4
+    else:
+        assert all("assistant_response_prefix" in group for group in page["groups"])
     assert page["outcomes"]["empirical_expected_reward_all"] == 1
     expected = page["pseudo_rewards"]["expected_reward" if count_partial else "full_reward_probability"]
     assert page["outcomes"]["pseudo_expected_reward"] == expected
@@ -267,6 +413,64 @@ def test_complete_testbed_with_native_environments_cached_tokenizer_and_fake_log
     assert page["outcomes"]["pseudo_reward_probability"] == expected_probability
     assert report["summary"]["page_mean_pseudo_expected_reward"] == expected
     assert json.loads(args.output.read_text())["summary"]["full_reward_purchase_count"] == 3
+
+
+def test_conditioned_run_replaces_page_with_incomplete_thought(native_start, monkeypatch, tmp_path):
+    from transformers import AutoTokenizer
+
+    start, selected = native_start
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct", local_files_only=True)
+    first = selected
+    replacement_product = dict(selected.product, asin="REPLACEMENT")
+    second = testbed.SelectedProductGoal(replacement_product, dict(selected.goal, asin="REPLACEMENT"))
+    items = (first, second)
+    price = start.env.server.product_prices[selected.product["asin"]]
+    server = SimpleNamespace(all_products=[item.product for item in items], goals=[item.goal for item in items], product_prices={first.product["asin"]: price, second.product["asin"]: price})
+
+    class Engine:
+        def __init__(self, **_kwargs):
+            self.llm_engine = SimpleNamespace(model_config=SimpleNamespace(max_model_len=8192))
+
+        def generate(self, prompts, sampling_params, **_kwargs):
+            texts = []
+            for params in sampling_params:
+                if params.seed == 5_000:
+                    texts.append("<think>unfinished")
+                elif params.seed == 5_001:
+                    texts.append("<think>ready</think><action>click[buy now]</action>")
+                else:
+                    texts.append("<action>click[buy now]</action>")
+            return [SimpleNamespace(outputs=[SimpleNamespace(token_ids=tokenizer.encode(text, add_special_tokens=False))]) for text in texts]
+
+    def score(_engine, rows, **_kwargs):
+        return [ProductOptionGroupPseudoRolloutScores(
+            choices=tuple(ActionChoiceScore(label, action, 1 / len(row.actions), 0, 0, 0) for label, action in zip(row.labels, row.actions)),
+            source_page_index=row.source_page_index, option_group=row.option_group, none_is_correct=row.none_is_correct,
+        ) for row in rows]
+
+    def sample(_products, _goals, num_pages, _seed):
+        if num_pages > len(items):
+            raise ValueError(f"Requested {num_pages} pages, but only {len(items)} parser-compatible products with generated training goals are available")
+        return items[:num_pages]
+
+    monkeypatch.setattr(testbed, "create_server", lambda *_args: server)
+    monkeypatch.setattr(testbed, "sample_diverse_product_goals", sample)
+    monkeypatch.setattr(testbed, "construct_start_episode", lambda *_args, **_kwargs: start.clone())
+    monkeypatch.setattr(testbed, "validate_full_reward", lambda *_args: {"full_reward": True, "raw_reward": 1.0, "selected_options": {}, "reward_info": {}})
+    monkeypatch.setattr(testbed, "score_product_page_grouped_choice_rollouts", score)
+    monkeypatch.setattr(testbed, "_configure_vllm_engine", lambda: None)
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: tokenizer)
+    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(SamplingParams=lambda **kwargs: SimpleNamespace(**kwargs), LLM=Engine))
+
+    args = testbed.build_argument_parser().parse_args(["--condition-pseudo-on-thinking", "--num-pages", "1", "--samples-per-page", "1", "--max-steps", "1", "--output", str(tmp_path / "report.json")])
+    report = testbed.run_testbed(args)
+
+    assert report["status"] == "complete"
+    assert [page["asin"] for page in report["pages"]] == ["REPLACEMENT"]
+    assert report["pages"][0]["source_page_index"] == 0
+    assert report["sampling"]["thinking_rejections"] == [{"asin": first.product["asin"], "reason": "no complete thought within max_new_tokens=512"}]
+    assert report["pages"][0]["trajectories"][0]["steps"][0]["format_valid"]
+    assert json.loads(args.output.read_text())["pages"][0]["asin"] == "REPLACEMENT"
 
 
 def test_singleton_groups_are_included_in_start_scoring(native_start, monkeypatch):

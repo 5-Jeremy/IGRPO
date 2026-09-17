@@ -15,27 +15,43 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import partial
 from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Sequence
+from urllib.parse import unquote, urlsplit
 
 import numpy as np
 
 from treehca.product_page_parser import extract_product_page_contexts, parse_product_page_fields
 from treehca.pseudo_rollout_product_page import GROUP_NONE_ACTION, prepare_product_page_grouped_choice_rollouts, required_max_logprobs, score_product_page_grouped_choice_rollouts
-from treehca.pseudo_rollout_product_page_choices_testbed import _DEFAULT_ATTRIBUTES, _DEFAULT_CATALOG, _WEBSHOP_ROOT, _wilson_interval
+from treehca.pseudo_rollout_product_page_choices_testbed import _DEFAULT_ATTRIBUTES, _DEFAULT_CATALOG, _WEBSHOP_ROOT, SampledAgentResponse, _wilson_interval
 from treehca.pseudo_rollout_product_page_grouped_choices_testbed import (
+    GroupResponsePrefix,
     SelectedProductGoal,
     _configure_vllm_engine,
     _engine_model_limit,
     _validate_positive_integer,
     build_artificial_group_response_prefixes,
+    extract_generated_group_thinking_prefix,
+    extract_page_thinking_prefix,
     sample_diverse_product_goals,
 )
 
 logger = logging.getLogger(__name__)
 _DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "pseudo_prob_test_results/pseudo_rollout_product_page_outcomes_report.json"
+
+
+def product_subpage_from_url(url: str | None) -> str | None:
+    """Read the actual WebShop description/features section from its URL."""
+    if not url:
+        return None
+    segments = urlsplit(url).path.strip("/").split("/")
+    if len(segments) < 6 or segments[0] != "item_sub_page":
+        return None
+    section = unquote(segments[5]).lower()
+    return section if section in {"description", "features"} else None
 
 
 def _webshop_modules():
@@ -98,6 +114,7 @@ class ProductEpisode:
             "purchased_asin": session["asin"] if purchased else None,
             "reward_info": copy.deepcopy(session.get("verbose_info")) if purchased else None,
             "observation": observation,
+            "product_subpage_after_action": product_subpage_from_url(self.env.browser.current_url),
         }
         self.manager.memory.store({"text_obs": self.manager.pre_text_obs, "action": [action]})
         self.manager.pre_text_obs = self.manager.format_obs([observation])
@@ -181,6 +198,65 @@ def validate_full_reward(episode: ProductEpisode, goal_options: dict[str, str]) 
     return {key: receipt[key] for key in ("raw_reward", "full_reward", "selected_options", "reward_info")}
 
 
+class ReachableStartSampler:
+    """Draw oracle-valid pages incrementally from one seeded candidate order."""
+
+    def __init__(self, server: Any, *, initial_budget: int, seed: int, history_length: int, results_size: int):
+        self.server = server
+        self.seed = seed
+        self.history_length = history_length
+        self.results_size = results_size
+        self.candidate_budget = initial_budget
+        self.candidates = sample_diverse_product_goals(server.all_products, server.goals, initial_budget, seed)
+        self.next_candidate_position = 0
+        self.oracle_rejections: list[dict[str, Any]] = []
+
+    def next_start(self) -> tuple[ProductEpisode, dict[str, Any]]:
+        while True:
+            if self.next_candidate_position == len(self.candidates):
+                self.candidate_budget += 1
+                try:
+                    expanded = sample_diverse_product_goals(self.server.all_products, self.server.goals, self.candidate_budget, self.seed)
+                except ValueError as error:
+                    if str(error).startswith(f"Requested {self.candidate_budget} pages, but only "):
+                        raise StopIteration from error
+                    raise
+                # Changing only the requested count must preserve the seeded prefix.
+                if [item.product["asin"] for item in expanded[:-1]] != [item.product["asin"] for item in self.candidates]:
+                    raise RuntimeError("Increasing the candidate pool changed the seeded product order")
+                self.candidates = expanded
+            candidate_position = self.next_candidate_position
+            item = self.candidates[candidate_position]
+            self.next_candidate_position += 1
+            asin = item.product["asin"]
+            start = construct_start_episode(self.server, item, seed=self.seed + candidate_position, history_length=self.history_length, results_size=self.results_size)
+            oracle = validate_full_reward(start, item.goal["goal_options"])
+            if not oracle["full_reward"]:
+                self.oracle_rejections.append({"asin": asin, "candidate_position": candidate_position, "goal_options": item.goal["goal_options"], "oracle": oracle})
+                logger.warning("Skipping ASIN %s: goal options earn native reward %.6f, not full reward", asin, oracle["raw_reward"])
+                continue
+            return start, {"asin": asin, "category": item.product.get("category"), "goal": item.goal, "price": self.server.product_prices[asin], "setup": start.setup, "oracle": oracle}
+
+
+def select_reachable_start_pages(
+    server: Any, *, num_pages: int, seed: int, history_length: int, results_size: int,
+) -> tuple[list[ProductEpisode], list[dict[str, Any]], ReachableStartSampler]:
+    """Fill the initial sample and retain the cursor for replacement pages."""
+    sampler = ReachableStartSampler(server, initial_budget=num_pages, seed=seed, history_length=history_length, results_size=results_size)
+    starts: list[ProductEpisode] = []
+    pages: list[dict[str, Any]] = []
+    while len(starts) < num_pages:
+        try:
+            start, page = sampler.next_start()
+        except StopIteration as error:
+            raise ValueError(f"Only {len(starts)} of {num_pages} requested pages have full native reward after checking {sampler.next_candidate_position} candidate products") from error
+        page["source_page_index"] = len(starts)
+        starts.append(start)
+        pages.append(page)
+        logger.info("Validated start %d/%d: %s", len(starts), num_pages, page["asin"])
+    return starts, pages, sampler
+
+
 def exit_reason(env: Any, action: str) -> str | None:
     """Recognize transitions that would leave the product before executing them."""
     engine, _ = _webshop_modules()
@@ -208,6 +284,8 @@ def collect_rollouts(
     max_steps: int = 13,
     seed: int = 0,
     store_prompts: bool = False,
+    first_step_sampler: Callable[[Sequence[str], Sequence[int]], Sequence[str]] | None = None,
+    first_step_response_prefix: str | None = None,
 ) -> list[dict[str, Any]]:
     """Sample one unconstrained response per live environment, then step it."""
     from agent_system.environments.env_package.webshop.projection import webshop_projection
@@ -222,9 +300,13 @@ def collect_rollouts(
     for step in range(max_steps):
         # Seeds belong to trajectory/step, so batching and early exits don't shift them.
         seeds = [seed + index * max_steps + step for index in active]
-        responses = list(sample_responses([episodes[index].prompt for index in active], seeds))
+        sampler = first_step_sampler if step == 0 and first_step_sampler is not None else sample_responses
+        responses = list(sampler([episodes[index].prompt for index in active], seeds))
         if len(responses) != len(active):
             raise ValueError("Sampler returned the wrong number of live-trajectory responses")
+        if step == 0 and first_step_response_prefix is not None:
+            # Projection expects the complete assistant response, including the shared thought.
+            responses = [first_step_response_prefix + response for response in responses]
         actions, valids = webshop_projection(responses.copy())
         next_active = []
         for index, action, valid, step_seed in zip(active, actions, valids, seeds):
@@ -238,7 +320,7 @@ def collect_rollouts(
                 record["selected_options"] = dict(episode.env.server.user_sessions[episode.env.session]["options"])
             else:
                 receipt = episode.advance(action)
-                step_record.update(raw_reward=receipt["raw_reward"], selected_options=receipt["selected_options"], observation=receipt["observation"])
+                step_record.update(raw_reward=receipt["raw_reward"], selected_options=receipt["selected_options"], observation=receipt["observation"], product_subpage_after_action=receipt["product_subpage_after_action"])
                 record.update({key: receipt[key] for key in ("purchased", "full_reward", "raw_reward", "selected_options")})
                 if receipt["done"]:
                     record.update(termination_reason="purchase" if receipt["purchased"] else "environment_done", purchased_asin=receipt["purchased_asin"], reward_info=receipt["reward_info"])
@@ -380,7 +462,7 @@ class VllmPolicy:
     def __init__(self, engine: Any, tokenizer: Any, args: argparse.Namespace, model_limit: int):
         self.engine, self.tokenizer, self.args, self.model_limit = engine, tokenizer, args, model_limit
 
-    def __call__(self, prompts: Sequence[str], seeds: Sequence[int]) -> list[str]:
+    def __call__(self, prompts: Sequence[str], seeds: Sequence[int], *, assistant_prefix_token_ids: Sequence[int] = ()) -> list[str]:
         from vllm import SamplingParams
 
         from verl.utils.torch_functional import tokenize_and_postprocess_data
@@ -393,6 +475,7 @@ class VllmPolicy:
                 chat = self.tokenizer.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)
                 ids, mask = tokenize_and_postprocess_data(prompt=chat, tokenizer=self.tokenizer, max_length=self.args.max_prompt_length, pad_token_id=self.tokenizer.pad_token_id, left_pad=True, truncation="error")
                 token_ids = ids[0][mask[0].bool()].tolist()
+                token_ids.extend(assistant_prefix_token_ids)
                 if len(token_ids) + self.args.max_new_tokens > self.model_limit:
                     raise ValueError("A rollout prompt plus response exceeds max_model_len; increase the context budget")
                 token_rows.append({"prompt_token_ids": token_ids})
@@ -407,8 +490,54 @@ class VllmPolicy:
         return responses
 
 
-def score_start_pages(engine: Any, tokenizer: Any, pseudo_rollouts: Sequence[Any], *, model_limit: int) -> list[dict[str, Any]]:
-    prefixes = build_artificial_group_response_prefixes(pseudo_rollouts, tokenizer)
+def sample_shared_page_thoughts(
+    starts: Sequence[ProductEpisode], pages: Sequence[dict[str, Any]], sampler: ReachableStartSampler,
+    policy: VllmPolicy, tokenizer: Any, *, seed: int, max_new_tokens: int,
+) -> tuple[list[ProductEpisode], list[dict[str, Any]], dict[int, GroupResponsePrefix], list[dict[str, Any]]]:
+    """Replace incomplete-thought pages with later oracle-valid candidates."""
+    requested_pages = len(starts)
+    accepted_starts: list[ProductEpisode] = []
+    accepted_pages: list[dict[str, Any]] = []
+    thoughts: dict[int, GroupResponsePrefix] = {}
+    rejected: list[dict[str, Any]] = []
+
+    def consider(start: ProductEpisode, page: dict[str, Any], response_text: str) -> None:
+        try:
+            thought = extract_page_thinking_prefix(SampledAgentResponse(response_text, ()), tokenizer)
+        except ValueError:
+            rejected.append({"asin": page["asin"], "reason": f"no complete thought within max_new_tokens={max_new_tokens}"})
+            logger.warning("Skipping ASIN %s: no complete thought within %d generated tokens", page["asin"], max_new_tokens)
+            return
+        page_index = len(accepted_starts)
+        page["source_page_index"] = page_index
+        page["shared_page_thinking"] = {"status": thought.status, "assistant_prefix_token_count": len(thought.token_ids)}
+        accepted_starts.append(start)
+        accepted_pages.append(page)
+        thoughts[page_index] = thought
+
+    responses = policy([start.prompt for start in starts], [seed + 5_000 + index for index in range(requested_pages)])
+    for start, page, response_text in zip(starts, pages, responses, strict=True):
+        consider(start, page, response_text)
+    attempted_thoughts = requested_pages
+    while len(accepted_starts) < requested_pages:
+        try:
+            start, page = sampler.next_start()
+        except StopIteration as error:
+            raise ValueError(f"Only {len(accepted_starts)} of {requested_pages} requested pages produced complete thoughts after {attempted_thoughts} thought attempts") from error
+        response_text = policy([start.prompt], [seed + 5_000 + attempted_thoughts])[0]
+        attempted_thoughts += 1
+        consider(start, page, response_text)
+    return accepted_starts, accepted_pages, thoughts, rejected
+
+
+def score_start_pages(
+    engine: Any, tokenizer: Any, pseudo_rollouts: Sequence[Any], *, model_limit: int,
+    page_thinking_by_page: dict[int, GroupResponsePrefix] | None = None,
+) -> list[dict[str, Any]]:
+    if page_thinking_by_page is None:
+        prefixes = build_artificial_group_response_prefixes(pseudo_rollouts, tokenizer)
+    else:
+        prefixes = tuple(extract_generated_group_thinking_prefix(page_thinking_by_page[pseudo.source_page_index], pseudo, tokenizer) for pseudo in pseudo_rollouts)
     scores = score_product_page_grouped_choice_rollouts(engine, pseudo_rollouts, max_model_len=model_limit, assistant_response_prefix_token_ids=[prefix.token_ids for prefix in prefixes])
     if len(scores) != len(pseudo_rollouts) or any(score is None for score in scores):
         raise ValueError("Every starting-page option group must fit the pseudo context budget")
@@ -420,7 +549,7 @@ def score_start_pages(engine: Any, tokenizer: Any, pseudo_rollouts: Sequence[Any
             "none_is_correct": pseudo.none_is_correct,
             "correct_probability": score.correct_probability,
             "prompt": pseudo.prompt,
-            "assistant_response_prefix": prefix.text,
+            **({"assistant_response_prefix": prefix.text} if page_thinking_by_page is None else {"assistant_response_prefix_source": prefix.source, "assistant_response_prefix_token_count": len(prefix.token_ids)}),
             "prompt_token_count": len(pseudo.prompt_token_ids),
             "options": [{"label": choice.label, "action": choice.action, "is_none": choice.action == GROUP_NONE_ACTION, "probability": choice.probability} for choice in score.choices],
         }
@@ -511,23 +640,20 @@ def _validate_arguments(args: argparse.Namespace) -> None:
 def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
     _validate_arguments(args)
     server = create_server(args.catalog, args.attributes, args.seed, args.num_products)
-    selected = sample_diverse_product_goals(server.all_products, server.goals, args.num_pages, args.seed)
-    starts, pages = [], []
-    for index, item in enumerate(selected):
-        start = construct_start_episode(server, item, seed=args.seed + index, history_length=args.history_length, results_size=args.results_size)
-        oracle = validate_full_reward(start, item.goal["goal_options"])
-        if not oracle["full_reward"]:
-            raise ValueError(f"ASIN {item.product['asin']} does not attain full native reward with the goal options: {oracle}. No environment reward rules were changed.")
-        starts.append(start)
-        pages.append({"source_page_index": index, "asin": item.product["asin"], "category": item.product.get("category"), "goal": item.goal, "price": server.product_prices[item.product["asin"]], "setup": start.setup, "oracle": oracle})
-        logger.info("Validated start %d/%d: %s", index + 1, args.num_pages, item.product["asin"])
+    starts, pages, start_sampler = select_reachable_start_pages(server, num_pages=args.num_pages, seed=args.seed, history_length=args.history_length, results_size=args.results_size)
     report = {
-        "schema_version": 2,
+        "schema_version": 3 if args.condition_pseudo_on_thinking and not args.validate_only else 2,
         "status": "running",
         "mode": "validate_only" if args.validate_only else "monte_carlo",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "configuration": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
-        "sampling": {"goal_source": "native synthetic WebShop goals, all generated goals as in the grouped testbed", "available_goals": len(server.goals), "setup": "constructed results set followed by a native product click"},
+        "sampling": {
+            "goal_source": "native synthetic WebShop goals, all generated goals as in the grouped testbed",
+            "available_goals": len(server.goals),
+            "setup": "constructed results set followed by a native product click",
+            "oracle_rejections": start_sampler.oracle_rejections,
+            "thinking_rejections": [],
+        },
         "pages": pages,
     }
     if args.validate_only:
@@ -541,10 +667,15 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer or args.model, trust_remote_code=args.trust_remote_code)
     parts = extract_product_page_contexts([start.prompt for start in starts])
-    pseudo_rollouts = prepare_product_page_grouped_choice_rollouts(parts, tokenizer, [item.goal["goal_options"] for item in selected])
+    pseudo_rollouts = prepare_product_page_grouped_choice_rollouts(parts, tokenizer, [page["goal"]["goal_options"] for page in pages])
     # Singleton groups are necessary here: their selection can matter for reward.
     if {pseudo.source_page_index for pseudo in pseudo_rollouts} != set(range(len(starts))):
         raise ValueError("Every sampled page must contribute option groups")
+    configured_max_logprobs = required_max_logprobs(pseudo_rollouts)
+    if args.condition_pseudo_on_thinking:
+        # A replacement page may have a larger option group than the initial pages.
+        catalog_max_choices = max((len(values) + 1 for product in server.all_products for values in product.get("options", {}).values()), default=0)
+        configured_max_logprobs = max(configured_max_logprobs, 2 * catalog_max_choices)
     kwargs = dict(
         model=args.model,
         tokenizer=args.tokenizer or args.model,
@@ -553,21 +684,43 @@ def run_testbed(args: argparse.Namespace) -> dict[str, Any]:
         gpu_memory_utilization=args.gpu_memory_utilization,
         trust_remote_code=args.trust_remote_code,
         seed=args.seed,
-        max_logprobs=required_max_logprobs(pseudo_rollouts),
+        max_logprobs=configured_max_logprobs,
         enable_prefix_caching=True,
     )
     if args.max_model_len is not None:
         kwargs["max_model_len"] = args.max_model_len
     engine = LLM(**kwargs)
     model_limit = _engine_model_limit(engine)
-    report["configuration"].update(effective_max_model_len=model_limit, vllm_engine_version="V0", pseudo_probability_mode="artificial_group_thinking_prefix", truncation="error")
-    group_scores = score_start_pages(engine, tokenizer, pseudo_rollouts, model_limit=model_limit)
+    report["configuration"].update(effective_max_model_len=model_limit, vllm_engine_version="V0", pseudo_probability_mode="shared_page_thinking" if args.condition_pseudo_on_thinking else "artificial_group_thinking_prefix", truncation="error")
     policy = VllmPolicy(engine, tokenizer, args, model_limit)
+    page_thinking_by_page = None
+    if args.condition_pseudo_on_thinking:
+        logger.info("Sampling one thought for each of %d starting pages", len(starts))
+        starts, pages, page_thinking_by_page, thinking_rejections = sample_shared_page_thoughts(starts, pages, start_sampler, policy, tokenizer, seed=args.seed, max_new_tokens=args.max_new_tokens)
+        report["pages"] = pages
+        report["sampling"]["thinking_rejections"] = thinking_rejections
+        parts = extract_product_page_contexts([start.prompt for start in starts])
+        pseudo_rollouts = prepare_product_page_grouped_choice_rollouts(parts, tokenizer, [page["goal"]["goal_options"] for page in pages])
+        if required_max_logprobs(pseudo_rollouts) > configured_max_logprobs:
+            raise RuntimeError("A replacement page requires more logprobs than the catalog-wide engine budget")
+    group_scores = score_start_pages(engine, tokenizer, pseudo_rollouts, model_limit=model_limit, page_thinking_by_page=page_thinking_by_page)
     for index, (start, page) in enumerate(zip(starts, pages)):
         groups = [group for group in group_scores if group["source_page_index"] == index]
         pseudo_probability = math.prod(group["correct_probability"] for group in groups)
         pseudo_rewards = compute_pseudo_rewards(start, groups)
-        trajectories = collect_rollouts(start, policy, samples_per_page=args.samples_per_page, max_steps=args.max_steps, seed=args.seed + 10_000 + index * args.samples_per_page * args.max_steps, store_prompts=args.store_trajectory_prompts)
+        first_step_sampler = None
+        first_step_response_prefix = None
+        if page_thinking_by_page is not None:
+            thought = page_thinking_by_page[index]
+            first_step_response_prefix = thought.text
+            first_step_sampler = partial(policy, assistant_prefix_token_ids=thought.token_ids)
+
+        trajectories = collect_rollouts(
+            start, policy, samples_per_page=args.samples_per_page, max_steps=args.max_steps,
+            seed=args.seed + 10_000 + index * args.samples_per_page * args.max_steps,
+            store_prompts=args.store_trajectory_prompts, first_step_sampler=first_step_sampler,
+            first_step_response_prefix=first_step_response_prefix,
+        )
         page.update(groups=groups, pseudo_rewards=pseudo_rewards, trajectories=trajectories, outcomes=summarize_outcomes(trajectories, pseudo_probability, count_partial_reward=args.count_partial_reward, pseudo_rewards=pseudo_rewards))
         report["pages_completed"] = index + 1
         # Checkpoint complete pages so a later inference error doesn't lose them.
@@ -601,6 +754,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-products", type=int, default=1000, help="Native WebShop catalog/index size")
     parser.add_argument("--num-pages", type=int, default=20)
     parser.add_argument("--samples-per-page", type=int, default=256)
+    parser.add_argument("--condition-pseudo-on-thinking", action="store_true", help="Share one sampled page thought across first empirical actions and grouped pseudo probes")
     parser.add_argument("--count_partial_reward", "--count-partial-reward", action="store_true", help="Count positive native rewards and compute fractional expected rewards; default rewards are training-style binary 0/1")
     parser.add_argument("--max-steps", type=int, default=13, help="Additional actions after the two setup steps; at most 13")
     parser.add_argument("--history-length", type=int, default=2)
