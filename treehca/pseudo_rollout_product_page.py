@@ -295,12 +295,17 @@ def build_product_page_grouped_choice_prompt(
     goal_options: Mapping[str, str],
     *,
     label_catalog: ActionLabelCatalog | None = None,
+    group_names: Sequence[str] | None = None,
+    annotate_correctness: bool = True,
 ) -> tuple[ProductOptionGroupChoicePrompt, ...]:
     """Build one labeled choice prompt per option group.
 
     ``goal_options`` is the synthetic WebShop goal's group-to-value mapping.
     Each returned group records every displayed option that WebShop's fuzzy
     option reward considers equivalent to that group's goal value.
+    ``group_names`` restricts preparation to requested groups. Native joint
+    reward callers use ``annotate_correctness=False`` to retain distributions
+    without imposing the older group-local correctness contract.
     """
     _validate_product_page_prompt_parts(parts)
     if not isinstance(goal_options, Mapping):
@@ -312,13 +317,21 @@ def build_product_page_grouped_choice_prompt(
 
     product_fields = parse_product_page_fields(parts.current_observation, parts.admissible_actions)
     parsed_groups = product_fields.option_groups
+    selected_names = {group.name for group in parsed_groups} if group_names is None else set(group_names)
+    if not selected_names <= {group.name for group in parsed_groups}:
+        raise ValueError("Requested option groups must be present on the product page")
     max_options = max((len(group.values) + 1 for group in parsed_groups), default=0)
     catalog = label_catalog or build_action_label_catalog(tokenizer, max_options)
     prompts = []
     for group in parsed_groups:
-        none_is_correct = _none_can_satisfy_goal(parsed_groups, group.name, goal_options)
-        correct_options = group.values if none_is_correct else tuple(option for option in group.values if group.name in goal_options and _option_matches_goal(option, goal_options[group.name]))
-        if not correct_options and not none_is_correct:
+        if group.name not in selected_names:
+            continue
+        # Native combination scoring needs distributions, not group-local labels.
+        none_is_correct = annotate_correctness and _none_can_satisfy_goal(parsed_groups, group.name, goal_options)
+        correct_options = ()
+        if annotate_correctness:
+            correct_options = group.values if none_is_correct else tuple(option for option in group.values if group.name in goal_options and _option_matches_goal(option, goal_options[group.name]))
+        if annotate_correctness and not correct_options and not none_is_correct:
             raise ValueError(f"No displayed option in group {group.name!r} matches its goal and omission cannot satisfy the goal")
         enriched_group = ProductOptionGroup(name=group.name, values=group.values, correct_options=correct_options)
         labels = tuple(entry.label for entry in catalog.prefix(len(group.values) + 1))
@@ -437,6 +450,8 @@ def prepare_product_page_grouped_choice_rollouts(
     goal_options_by_page: Sequence[Mapping[str, str]],
     *,
     label_catalog: ActionLabelCatalog | None = None,
+    group_names_by_page: Sequence[Sequence[str]] | None = None,
+    annotate_correctness: bool = True,
 ) -> tuple[ProductOptionGroupPseudoRollout, ...]:
     """Build and tokenize one pseudo-rollout per option group across a batch."""
     if isinstance(parts, (str, bytes)):
@@ -447,6 +462,8 @@ def prepare_product_page_grouped_choice_rollouts(
     goal_options_by_page = tuple(goal_options_by_page)
     if len(goal_options_by_page) != len(parts):
         raise ValueError("goal_options_by_page must align with parts")
+    if group_names_by_page is not None and len(group_names_by_page) != len(parts):
+        raise ValueError("group_names_by_page must align with parts")
     if not parts:
         return ()
 
@@ -462,7 +479,14 @@ def prepare_product_page_grouped_choice_rollouts(
 
     prepared = []
     for source_page_index, (item, goal_options) in enumerate(zip(parts, goal_options_by_page)):
-        choice_prompts = build_product_page_grouped_choice_prompt(item, tokenizer, goal_options, label_catalog=catalog)
+        choice_prompts = build_product_page_grouped_choice_prompt(
+            item,
+            tokenizer,
+            goal_options,
+            label_catalog=catalog,
+            group_names=None if group_names_by_page is None else group_names_by_page[source_page_index],
+            annotate_correctness=annotate_correctness,
+        )
         for choice_prompt in choice_prompts:
             entries = catalog.prefix(len(choice_prompt.labels))
             prepared.append(

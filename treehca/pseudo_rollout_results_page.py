@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -74,34 +75,33 @@ def _tokenize_prompt(tokenizer: Any, prompt: str) -> list[int]:
     return token_ids
 
 
-def compute_results_page_answer_probability(
+@dataclass(frozen=True)
+class ResultsPageAnswerProbe:
+    """Unpadded teacher-forcing input and the response tokens to measure."""
+
+    prompt_token_ids: tuple[int, ...]
+    response_token_ids: tuple[int, ...]
+    answer_token_indices: tuple[int, ...]
+
+    @property
+    def input_token_ids(self) -> tuple[int, ...]:
+        return self.prompt_token_ids + self.response_token_ids
+
+
+def prepare_results_page_answer_probe(
     prompt: str,
     action: str,
     tokenizer: Any,
-    actor_rollout_wg: Any,
     *,
     assistant_response_prefix: str = "",
-) -> torch.Tensor:
-    """Return the joint model probability of the action tokens.
-
-    As in :func:`igpo.core_igpo.compute_answer_block_avg_log_prob`,
-    response-token log-probabilities whose character offsets overlap the text
-    inside the final ``<answer>...</answer>`` block are selected. Unlike that
-    function, they are summed rather than averaged before exponentiation, so
-    the result is the joint probability of generating the complete action.
-
-    The original prompt is passed unchanged as the chat template's user
-    content. An optional generated assistant prefix, such as a complete
-    thinking block, conditions the answer and is preserved verbatim.
-    """
+    prompt_token_ids: tuple[int, ...] | None = None,
+) -> ResultsPageAnswerProbe:
+    """Prepare scalar-scoring tokens; reuse prompt IDs for the same prompt."""
     pseudo_rollout = build_results_page_pseudo_rollout(
         prompt,
         action,
         assistant_response_prefix=assistant_response_prefix,
     )
-    if actor_rollout_wg is None or not callable(getattr(actor_rollout_wg, "compute_log_prob", None)):
-        raise ValueError("actor_rollout_wg must provide compute_log_prob")
-
     # Tokenize the assistant response independently so its offsets refer to
     # the exact string that the model is being asked to generate.
     response = pseudo_rollout[len(prompt) :]
@@ -127,7 +127,30 @@ def compute_results_page_answer_probability(
     if not answer_token_indices:
         raise ValueError(f"No tokens overlap the action span {answer_interval} for action {action!r}")
 
-    prompt_ids = torch.tensor([_tokenize_prompt(tokenizer, prompt)], dtype=response_ids.dtype, device=response_ids.device)
+    if prompt_token_ids is None:
+        prompt_token_ids = tuple(_tokenize_prompt(tokenizer, prompt))
+    return ResultsPageAnswerProbe(prompt_token_ids, tuple(response_ids[0].tolist()), tuple(answer_token_indices))
+
+
+def compute_results_page_answer_probability(
+    prompt: str,
+    action: str,
+    tokenizer: Any,
+    actor_rollout_wg: Any,
+    *,
+    assistant_response_prefix: str = "",
+) -> torch.Tensor:
+    """Return joint action-token probability, retaining the original prompt.
+
+    Sum log probabilities for response tokens overlapping the final answer's
+    action text. Neither the answer tags nor an optional thinking prefix enter
+    that sum, although they remain part of the conditioning context.
+    """
+    probe = prepare_results_page_answer_probe(prompt, action, tokenizer, assistant_response_prefix=assistant_response_prefix)
+    if actor_rollout_wg is None or not callable(getattr(actor_rollout_wg, "compute_log_prob", None)):
+        raise ValueError("actor_rollout_wg must provide compute_log_prob")
+    response_ids = torch.tensor([probe.response_token_ids], dtype=torch.long)
+    prompt_ids = torch.tensor([probe.prompt_token_ids], dtype=torch.long)
     input_ids = torch.cat((prompt_ids, response_ids), dim=1)
     attention_mask = torch.ones_like(input_ids)
     position_ids = torch.arange(input_ids.shape[1], dtype=torch.long, device=input_ids.device).unsqueeze(0)
@@ -151,5 +174,5 @@ def compute_results_page_answer_probability(
 
     # Joint probabilities for multi-token actions can fall below float32's
     # range even when every log-probability is finite.
-    joint_log_probability = response_log_probs[0, answer_token_indices].double().sum()
+    joint_log_probability = response_log_probs[0, list(probe.answer_token_indices)].double().sum()
     return joint_log_probability.exp()

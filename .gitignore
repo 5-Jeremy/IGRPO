@@ -1,6 +1,7 @@
 rollouts/*
 validation/*
 pseudo_prob_test_results/*
+pseudo_prob_sim_results/*
 AGENTS.md
 ray_tmp/*
 
