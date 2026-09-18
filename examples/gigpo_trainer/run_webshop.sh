@@ -74,7 +74,7 @@ python3 -u -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=False \
     algorithm.gamma=0.95 \
     algorithm.gigpo.step_advantage_w=1.0 \
-    algorithm.gigpo.mode=$mode \
+    algorithm.gigpo.mode="mean_norm" \
     env.env_name=Webshop \
     env.webshop.use_small=True \
     env.seed=0 \
