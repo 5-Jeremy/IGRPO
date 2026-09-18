@@ -707,7 +707,7 @@ class RayPPOTrainer:
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
-    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path):
+    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path, rollout_fields=None):
         """Dump rollout/validation samples as JSONL."""
         os.makedirs(dump_path, exist_ok=True)
         filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
@@ -723,6 +723,13 @@ class RayPPOTrainer:
         for k, v in reward_extra_infos_dict.items():
             if len(v) == n:
                 base_data[k] = v
+
+        if rollout_fields is not None:
+            base_data.pop("step", None)
+            for key, values in rollout_fields.items():
+                if len(values) != n:
+                    raise ValueError(f"TreeHCA rollout field {key} has {len(values)} values for {n} records")
+                base_data[key] = values
 
         with open(filename, "w") as f:
             for i in range(n):
@@ -1379,12 +1386,18 @@ class RayPPOTrainer:
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                            rollout_fields = None
+                            if self.config.algorithm.adv_estimator == AdvantageEstimator.TREEHCA:
+                                from treehca.rollout_records import build_treehca_rollout_fields
+
+                                rollout_fields = build_treehca_rollout_fields(batch.non_tensor_batch)
                             self._dump_generations(
                                 inputs=inputs,
                                 outputs=outputs,
                                 scores=scores,
                                 reward_extra_infos_dict=reward_extra_infos_dict,
                                 dump_path=rollout_data_dir,
+                                rollout_fields=rollout_fields,
                             )
 
                     if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):

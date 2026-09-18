@@ -181,7 +181,7 @@ def test_collector_updates_archived_parent_before_using_child_gains(monkeypatch,
             return {"text": ["prompt"] * 2}, np.zeros(2), np.zeros(2, dtype=bool), [{"won": False}] * 2
 
         def scoring_page_types(self):
-            return [""] * 2
+            return ["" if self.step_index == 0 else "search_results"] * 2
 
         def scoring_payloads(self, *args):
             return np.asarray([None, None], dtype=object)
@@ -220,4 +220,6 @@ def test_collector_updates_archived_parent_before_using_child_gains(monkeypatch,
     assert sibling["info_gain"] == pytest.approx(transform(0.25) - transform(0.45))
     assert first["info_gain"] == 0
     assert second["info_gain"] == pytest.approx(transform(0.04) - transform(0.81))
+    assert [row["page_type"] for row in rows] == ["", "", "search_results", "search_results"]
+    assert first["avg_ans_log_probs"] == pytest.approx(math.log(0.81))
     assert branch_values[1] == pytest.approx([transform(0.81) / 2, (2 * transform(0.04) - transform(0.81)) / 2])

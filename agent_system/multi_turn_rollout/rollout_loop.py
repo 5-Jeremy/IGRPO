@@ -649,6 +649,9 @@ class TrajectoryCollector:
             batch.non_tensor_batch['text_actions'] = text_actions
 
             previous_page_types = node_management.envs.scoring_page_types() if webshop_scorer is not None else None
+            if self.config.algorithm.adv_estimator == AdvantageEstimator.TREEHCA:
+                # This is the page in the prompt, before the action changes the environment.
+                batch.non_tensor_batch["page_type"] = np.asarray(previous_page_types if previous_page_types is not None else [None] * batch_size, dtype=object)
             next_obs, rewards, dones, infos = node_management.envs.step(text_actions)
             node_management.obs = next_obs
 
@@ -708,6 +711,8 @@ class TrajectoryCollector:
                                                                         response_length=self.config.data.max_response_length)
                 avg_ans_log_probs = info_gain_batch.batch.pop("avg_ans_log_probs")
                 del info_gain_batch
+                if self.config.algorithm.adv_estimator == AdvantageEstimator.TREEHCA and webshop_scorer is None:
+                    batch.non_tensor_batch["avg_ans_log_probs"] = torch_to_numpy(avg_ans_log_probs[torch.argsort(reorder_index)], is_object=False)[:batch_size].copy()
                 info_gain_sum = torch.exp(avg_ans_log_probs) if self.config.algorithm.igrpo.prob_diff_mode else avg_ans_log_probs
                 del avg_ans_log_probs
                 info_gain_sum = info_gain_sum[torch.argsort(reorder_index)]
