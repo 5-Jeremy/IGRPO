@@ -117,6 +117,10 @@ History removal is also outside this builder's current contract.
 
 ### Group-specific option prompts
 
+This section describes the standalone vLLM grouped-choice probes. TreeHCA
+training uses exact option-name responses and answer-token log probabilities;
+see [WebShop training scoring](training_webshop_scoring.md#inference).
+
 `build_product_page_grouped_choice_prompt` builds one prompt for each parsed
 product option group. Each prompt retains the task and observation but replaces
 the admissible-action block with letter-labeled bare option values for only that

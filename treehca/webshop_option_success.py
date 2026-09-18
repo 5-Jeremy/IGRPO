@@ -29,6 +29,42 @@ class NativeOptionSuccessPlan:
     full_mask: int
     constant_probability: float | None = None
 
+    def successful_actions(self) -> dict[str, tuple[str, ...]]:
+        """Return choices that occur in at least one full-coverage combination."""
+        prefixes = [{self.fixed_mask}]
+        for group in self.groups:
+            prefixes.append({covered | mask for covered in prefixes[-1] for mask in group.masks})
+        suffixes = [set() for _ in range(len(self.groups) + 1)]
+        suffixes[-1] = {0}
+        for index in range(len(self.groups) - 1, -1, -1):
+            suffixes[index] = {covered | mask for covered in suffixes[index + 1] for mask in self.groups[index].masks}
+        return {
+            group.name: tuple(action for action, mask in zip(group.actions, group.masks) if any((left | mask | right) == self.full_mask for left in prefixes[index] for right in suffixes[index + 1]))
+            for index, group in enumerate(self.groups)
+        }
+
+    def aggregate_success_mass(self, distributions: Mapping[str, Mapping[str, float]]) -> float:
+        """Sum raw action probabilities over full-coverage combinations only."""
+        if self.constant_probability is not None:
+            return self.constant_probability
+        if set(distributions) != {group.name for group in self.groups}:
+            raise ValueError("Every required option group must have exactly one distribution")
+        masses = {self.fixed_mask: 1.0}
+        for group in self.groups:
+            choices = distributions[group.name]
+            if not set(choices) <= set(group.actions):
+                raise ValueError(f"Distribution contains an unknown choice for {group.name!r}")
+            next_masses = defaultdict(list)
+            for covered, mass in masses.items():
+                for action, mask in zip(group.actions, group.masks):
+                    if action in choices:
+                        probability = float(choices[action])
+                        if not math.isfinite(probability) or not 0 <= probability <= 1:
+                            raise ValueError("Option probabilities must be finite and in [0, 1]")
+                        next_masses[covered | mask].append(mass * probability)
+            masses = {mask: math.fsum(terms) for mask, terms in next_masses.items()}
+        return min(1.0, max(0.0, masses.get(self.full_mask, 0.0)))
+
     def aggregate(self, distributions: Mapping[str, Mapping[str, float]]) -> float:
         if self.constant_probability is not None:
             return self.constant_probability

@@ -595,6 +595,7 @@ class TrajectoryCollector:
                     max_model_len=self.config.actor_rollout_ref.rollout.get("max_model_len") or (self.config.data.max_prompt_length + self.config.data.max_response_length),
                     path_probability_threshold=self.config.algorithm.treehca.get("webshop_path_probability_threshold", 1e-3),
                     batch_size=self.config.algorithm.treehca.get("webshop_probe_batch_size", 32),
+                    prune_unsuccessful_choices=self.config.algorithm.treehca.get("webshop_prune_unsuccessful_choices", True),
                     apply_chat_template_kwargs=self.config.data.get("apply_chat_template_kwargs", {}),
                 )
                 from treehca.webshop_deferred_scores import WebshopDeferredScores

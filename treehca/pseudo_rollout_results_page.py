@@ -102,9 +102,12 @@ def prepare_results_page_answer_probe(
         action,
         assistant_response_prefix=assistant_response_prefix,
     )
-    # Tokenize the assistant response independently so its offsets refer to
-    # the exact string that the model is being asked to generate.
-    response = pseudo_rollout[len(prompt) :]
+    return prepare_tagged_answer_probe(prompt, pseudo_rollout[len(prompt) :], tokenizer, prompt_token_ids=prompt_token_ids)
+
+
+def prepare_tagged_answer_probe(prompt: str, response: str, tokenizer: Any, *, prompt_token_ids: tuple[int, ...] | None = None) -> ResultsPageAnswerProbe:
+    """Score only the answer text in a teacher-forced tagged response."""
+    # Tokenize the response independently, as for search-result actions.
     encoded_response = tokenizer(
         response,
         return_tensors="pt",
@@ -125,7 +128,7 @@ def prepare_results_page_answer_probe(
     answer_interval = (answer_start + len("<answer>"), answer_end)
     answer_token_indices = [index for index, (start, end) in enumerate(offsets[0].tolist()) if start != end and max(start, answer_interval[0]) < min(end, answer_interval[1])]
     if not answer_token_indices:
-        raise ValueError(f"No tokens overlap the action span {answer_interval} for action {action!r}")
+        raise ValueError(f"No tokens overlap the answer span {answer_interval}")
 
     if prompt_token_ids is None:
         prompt_token_ids = tuple(_tokenize_prompt(tokenizer, prompt))

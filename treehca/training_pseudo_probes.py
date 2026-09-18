@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 
 import torch
 
@@ -14,16 +15,25 @@ from verl.protocol import pad_dataproto_to_divisor
 from verl.utils.model import compute_position_id_with_mask
 
 
+@dataclass(frozen=True)
+class TrainingProductOptionProbe:
+    """One group of exact option responses, including the synthetic none choice."""
+
+    actions: tuple[str, ...]
+    option_names: tuple[str, ...]
+    answer_probes: tuple[ResultsPageAnswerProbe, ...]
+
+
 class TrainingPseudoProbeScorer:
-    """Use selected-token logprobs; normalize product labels over allowed IDs.
+    """Use teacher-forced answer-token logprobs for training probes.
 
     Each label variant becomes a one-token teacher-forcing row. This requires
     more forward passes than a vocabulary-logit API but no new worker RPC.
     """
 
     def __init__(self, tokenizer, actor_rollout_wg, *, max_model_len, batch_size=32):
-        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or not 1 <= batch_size <= 32:
-            raise ValueError("Probe batch_size must be between 1 and 32")
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("Probe batch_size must be a positive integer")
         self.tokenizer = tokenizer
         self.actor = actor_rollout_wg
         self.max_model_len = max_model_len
@@ -48,6 +58,8 @@ class TrainingPseudoProbeScorer:
             elif isinstance(probe, ProductOptionGroupPseudoRollout):
                 prefix = tuple(self.tokenizer.encode(f"<think>The best choice for the {probe.option_group.name} group corresponds to the label:", add_special_tokens=False))
                 owners.append([request(probe.prompt_token_ids + prefix, (token,), (0,)) for token in probe.allowed_token_ids])
+            elif isinstance(probe, TrainingProductOptionProbe):
+                owners.append([request(answer.prompt_token_ids, answer.response_token_ids, answer.answer_token_indices) for answer in probe.answer_probes])
             else:
                 raise TypeError(f"Unsupported pseudo probe: {type(probe).__name__}")
 
@@ -93,6 +105,14 @@ class TrainingPseudoProbeScorer:
         for probe, indices in zip(probes, owners):
             if isinstance(probe, ResultsPageAnswerProbe):
                 scores.append(math.exp(values[indices[0]]))
+                continue
+            if isinstance(probe, TrainingProductOptionProbe):
+                logs = torch.tensor([values[index] for index in indices], dtype=torch.float64)
+                choices = tuple(
+                    ActionChoiceScore(name, action, math.exp(float(logp)), float(logp), float(logp), -math.inf)
+                    for name, action, logp in zip(probe.option_names, probe.actions, logs)
+                )
+                scores.append(ProductPagePseudoRolloutScores(choices))
                 continue
             logs = torch.tensor([values[index] for index in indices], dtype=torch.float64).reshape(-1, 2)
             normalizer = torch.logsumexp(logs.flatten(), dim=0)

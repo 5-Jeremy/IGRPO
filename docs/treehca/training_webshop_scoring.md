@@ -102,9 +102,17 @@ environments retain their existing zero root baseline and gain computation.
 `actor_rollout_wg.compute_log_prob` using the current training actor:
 
 - Results probes sum the action-token log probabilities, then exponentiate.
-- Each bare/space-prefixed product label is a separate one-token continuation
-  after the existing fixed assistant cue. A log-sum-exp normalizes over all
-  allowed labels, and the two variants are summed for each choice.
+- Each product option group gets its own prompt listing exact option names and
+  a synthetic `none` choice. The assistant response is
+  `<answer>option name</answer>`. As on search-result pages, teacher forcing
+  sums log probabilities for tokens overlapping the answer text; the tags
+  provide context but do not enter that sum. The raw joint probabilities of
+  full-reward choice combinations are summed for native reward aggregation.
+- `algorithm.treehca.webshop_prune_unsuccessful_choices` defaults to `true`.
+  It scores only option names that occur in at least one full-reward purchase
+  combination, using the native option-coverage plan. Set it to `false` to
+  score every displayed option and `none`; choices outside full-reward
+  combinations still contribute zero to the final probability.
 - Identical teacher-forcing requests are deduplicated per stage. Up to
   `algorithm.treehca.webshop_probe_batch_size` unique rows (default 32) are
   submitted per call, followed by any required worker-divisibility padding.
@@ -116,8 +124,27 @@ FSDP and Megatron workers honor `treehca_probe_temperature=1.0` only when
 explicitly supplied by these probe requests. All other log-probability calls
 keep their configured temperature. No new model, vLLM engine, generation RPC,
 or vLLM V0/prefix-cache configuration is needed. This initial implementation
-performs one forward row per label variant; a selected-vocabulary-logit RPC
-could make this more efficient later.
+performs one forward row per complete option-name response.
+
+For a page with a `color` group containing `red` and `blue`, one pseudo
+rollout has this shape (the task and observation precede this excerpt):
+
+```text
+Your available options for color are:
+[
+red
+blue
+none (do not select any option in this group)
+].
+
+Now choose one option for the "color" group. The "none" choice means never clicking an option in this group. Write the exact option name, or "none", inside <answer>...</answer>. For example: <answer>red</answer>.
+```
+
+The `red` probe appends `<answer>red</answer>` after the assistant boundary.
+If only `red` can occur in a full-reward combination, the default setting
+scores just that response. With pruning disabled, the `blue` and `none` probes
+use the same prompt with their respective exact names. A second option group
+receives a separate prompt and set of probes.
 
 The context limit is `actor_rollout_ref.rollout.max_model_len`, falling back
 to `data.max_prompt_length + data.max_response_length` when unset. Pruning uses

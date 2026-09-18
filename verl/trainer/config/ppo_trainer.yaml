@@ -136,7 +136,6 @@ actor_rollout_ref:
     engine_kwargs: # inference engine parameters
       vllm:
         swap_space: null # null means "use the engine default value" (usually 4 GB), setting it to, e.g., 32 means 32 GB
-        max_logprobs: 110
       sglang:
         attention_backend: null # null means use the engine default value, available options: flashinfer, triton, flashmla
     val_kwargs:
@@ -262,6 +261,7 @@ algorithm:
     pseudo_scorer: auto # auto / answer_block / webshop; auto detects env.env_name
     webshop_path_probability_threshold: 1.0e-3
     webshop_probe_batch_size: 32 # unique teacher-forcing rows before worker padding
+    webshop_prune_unsuccessful_choices: true # score only options in a full-reward purchase combination
     prob_floor: 1.0e-6 # clamp p_gt before inverting it
     weight_temp: 1.0 # w_c = (1 / p_gt(c)) ** weight_temp
     max_weight_ratio: -1.0 # truncate w_c at this multiple of the mean sibling weight; -1 disables

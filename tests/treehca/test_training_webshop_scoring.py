@@ -17,8 +17,10 @@ from treehca.pseudo_rollout_product_page_outcomes_testbed import _DEFAULT_ATTRIB
 from treehca.pseudo_rollout_results_page import ResultsPageAnswerProbe
 from treehca.training_pseudo_probes import TrainingPseudoProbeScorer
 from treehca.training_webshop_env import TreeHCAWebshopWorker
-from treehca.training_webshop_scoring import WebshopInfoGainScorer, resolve_treehca_scorer
+from treehca.training_webshop_scoring import TrainingWebshopTurnSuccessScorer, WebshopInfoGainScorer, resolve_treehca_scorer
+from treehca.webshop_option_success import NativeOptionSuccessPlan, OptionCoverageGroup
 from treehca.webshop_probability_snapshot import WebshopTurnSnapshot
+from treehca.webshop_turn_success import _ProductJob
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 
@@ -63,6 +65,14 @@ def test_overflow_is_an_error_before_actor_call():
     with pytest.raises(ValueError, match="overflowing"):
         scorer.score([ResultsPageAnswerProbe((1, 2), (3,), (0,))])
     assert not actor.calls
+
+
+def test_unsuccessful_choice_pruning_defaults_on_and_requires_boolean():
+    scorer = WebshopInfoGainScorer(SimpleNamespace(), FakeActor(), max_model_len=64)
+    assert scorer.prune_unsuccessful_choices is True
+    assert WebshopInfoGainScorer(SimpleNamespace(), FakeActor(), max_model_len=64, prune_unsuccessful_choices=False).prune_unsuccessful_choices is False
+    with pytest.raises(ValueError, match="prune_unsuccessful_choices"):
+        WebshopInfoGainScorer(SimpleNamespace(), FakeActor(), max_model_len=64, prune_unsuccessful_choices="false")
 
 
 @pytest.mark.parametrize(
@@ -159,6 +169,63 @@ def test_native_payload_order_duplicates_cache_and_policy_invalidation(native_tr
     scorer.compute(batch, policy_version=1)
     assert len(actor.calls) > calls
     assert torch.exp(batch.batch["avg_ans_log_probs"]).tolist() == pytest.approx(values.tolist())
+
+
+def test_training_product_probe_uses_exact_names_and_joint_answer_tokens(native_training):
+    episode, tokenizer = native_training
+    snapshot = payload_for(worker_for(episode), episode)["snapshot"]
+    parts = extract_product_page_contexts([snapshot.prompt])[0]
+    from treehca.product_page_parser import parse_product_page_fields
+
+    group = parse_product_page_fields(parts.current_observation, parts.admissible_actions).option_groups[0]
+    actions = tuple(f"click[{name}]" for name in group.values) + ("none",)
+    plan = NativeOptionSuccessPlan((OptionCoverageGroup(group.name, actions, (1,) + (0,) * (len(actions) - 1)),), 0, 1)
+    job = _ProductJob(snapshot, plan)
+    scorer = object.__new__(TrainingWebshopTurnSuccessScorer)
+    scorer.probe_scorer = SimpleNamespace(tokenizer=tokenizer)
+    scorer.prune_unsuccessful_choices = False
+    probes, owners = [], []
+    scorer._append_product_probes([job], probes, owners)
+    assert owners == [(job, group.name)]
+    probe = probes[0]
+    assert probe.option_names == (*group.values, "none")
+    assert probe.actions == actions
+    rendered_prompt = tokenizer.decode(probe.answer_probes[0].prompt_token_ids)
+    assert f"Your available options for {group.name} are:" in rendered_prompt
+    assert all(f"\n{name}\n" in rendered_prompt for name in group.values)
+    assert "letter" not in rendered_prompt
+    for name, answer in zip(probe.option_names, probe.answer_probes):
+        response = tokenizer.decode(answer.response_token_ids)
+        assert response == f"<answer>{name}</answer>"
+        assert answer.answer_token_indices
+        assert all("answer" not in tokenizer.decode([answer.response_token_ids[index]]) for index in answer.answer_token_indices)
+    actor = FakeActor()
+    scores = TrainingPseudoProbeScorer(tokenizer, actor, max_model_len=32768).score(probes)[0]
+    raw = [math.prod((token + 1) / 1_000_000 for token in (answer.response_token_ids[index] for index in answer.answer_token_indices)) for answer in probe.answer_probes]
+    assert scores.action_probabilities == pytest.approx(dict(zip(actions, raw)))
+    assert plan.aggregate_success_mass({group.name: scores.action_probabilities}) == pytest.approx(raw[0])
+
+    scorer.prune_unsuccessful_choices = True
+    pruned, pruned_owners = [], []
+    scorer._append_product_probes([job], pruned, pruned_owners)
+    assert pruned_owners == owners
+    assert pruned[0].actions == (actions[0],)
+    assert pruned[0].option_names == (group.values[0],)
+    pruned_scores = TrainingPseudoProbeScorer(tokenizer, FakeActor(), max_model_len=32768).score(pruned)[0]
+    assert plan.aggregate_success_mass({group.name: pruned_scores.action_probabilities}) == pytest.approx(raw[0])
+
+
+def test_successful_actions_include_cross_group_completions():
+    plan = NativeOptionSuccessPlan(
+        (
+            OptionCoverageGroup("size", ("click[small]", "click[large]", "none"), (1, 0, 0)),
+            OptionCoverageGroup("color", ("click[red]", "click[blue]", "none"), (2, 0, 0)),
+        ),
+        0,
+        3,
+    )
+    assert plan.successful_actions() == {"size": ("click[small]",), "color": ("click[red]",)}
+    assert plan.aggregate_success_mass({"size": {"click[small]": 0.3}, "color": {"click[red]": 0.4}}) == pytest.approx(0.12)
 
 
 @pytest.mark.parametrize("page", ["index", "unknown"])
