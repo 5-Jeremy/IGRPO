@@ -189,9 +189,6 @@ def _observation_fragments(observation: str) -> tuple[str, ...]:
 
 
 def _parse_option_groups(fragments: tuple[str, ...], action_set: set[str]) -> tuple[ProductOptionGroup, ...]:
-    # Duplicate fragments can hide a clickable group name or shared value; see Option-group heuristic in the assumptions document.
-    if len(set(fragments)) != len(fragments):
-        raise ValueError("Repeated option names or values make option grouping ambiguous")
     groups = []
     index = 0
     while index < len(fragments):
@@ -205,7 +202,12 @@ def _parse_option_groups(fragments: tuple[str, ...], action_set: set[str]) -> tu
             index += 1
         if start == index:
             raise ValueError(f"Option group {name!r} has no recognized clickable values")
-        groups.append(ProductOptionGroup(name=name, values=fragments[start:index]))
+        # WebShop displays duplicate normalized values but exposes just one click command.
+        groups.append(ProductOptionGroup(name=name, values=tuple(dict.fromkeys(fragments[start:index]))))
+    names = [group.name for group in groups]
+    values = [value for group in groups for value in group.values]
+    if len(set(names)) != len(names) or len(set(values)) != len(values):
+        raise ValueError("Repeated option names or values across groups make option grouping ambiguous")
     return tuple(groups)
 
 
@@ -233,9 +235,13 @@ def parse_product_page_fields(current_observation: str, admissible_actions: Sequ
     if fragments[-len(suffix) :] != suffix:
         raise ValueError("Expected Description, Features, optional Attributes, and Buy Now at the end of the page")
     product = fragments[2 : -len(suffix)]
-    if len(product) < 3 or not product[-2].startswith("Price: ") or not product[-1].startswith("Rating: "):
+    if len(product) < 2 or not product[-2].startswith("Price: ") or not product[-1].startswith("Rating: "):
         raise ValueError("Expected a product title, Price: field, and Rating: field before the detail controls")
-    title, price_field, rating_field = product[-3:]
+    price_field, rating_field = product[-2:]
+    # An empty catalog title has no rendered fragment. A non-clickable final
+    # fragment is a title; otherwise the page has no title.
+    has_title = len(product) >= 3 and f"click[{product[-3]}]" not in action_set
+    title = product[-3] if has_title else ""
     price_text, rating_text = price_field[len("Price: ") :], rating_field[len("Rating: ") :]
     if not price_text or not rating_text:
         raise ValueError("Price and rating fields must contain text")
@@ -243,7 +249,7 @@ def parse_product_page_fields(current_observation: str, admissible_actions: Sequ
     control_actions = {f"click[{control.lower()}]" for control in _NAVIGATION + suffix}
     if not control_actions <= action_set:
         raise ValueError(f"Missing page-control actions: {sorted(control_actions - action_set)}")
-    option_fragments = product[:-3]
+    option_fragments = product[:-3] if has_title else product[:-2]
     if any(f"click[{fragment.lower()}]" in control_actions for fragment in option_fragments):
         raise ValueError("Option name or value collides with a page control")
     option_groups = _parse_option_groups(option_fragments, action_set)

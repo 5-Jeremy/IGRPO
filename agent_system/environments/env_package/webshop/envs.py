@@ -99,6 +99,7 @@ class WebshopMultiProcessEnv(gym.Env):
         resources_per_worker: dict,
         is_train: bool = True,
         env_kwargs: dict = None,
+        worker_class=None,
     ) -> None:
         super().__init__()
 
@@ -117,7 +118,7 @@ class WebshopMultiProcessEnv(gym.Env):
         self._env_kwargs = env_kwargs if env_kwargs is not None else {'observation_mode': 'text', 'num_products': None}
 
         # -------------------------- Ray actors setup --------------------------
-        env_worker = ray.remote(**resources_per_worker)(WebshopWorker)
+        env_worker = ray.remote(**resources_per_worker)(worker_class or WebshopWorker)
         self._workers = []
         for i in range(self.num_processes):
             worker = env_worker.remote(seed + (i // self.group_n), self._env_kwargs)
@@ -245,6 +246,7 @@ def build_webshop_envs(
     resources_per_worker: dict,
     is_train: bool = True,
     env_kwargs: dict = None,
+    worker_class=None,
 ):
     """Mirror *build_sokoban_envs* so higher‑level code can swap seamlessly."""
     return WebshopMultiProcessEnv(
@@ -254,4 +256,5 @@ def build_webshop_envs(
         resources_per_worker=resources_per_worker,
         is_train=is_train,
         env_kwargs=env_kwargs,
+        worker_class=worker_class,
     )

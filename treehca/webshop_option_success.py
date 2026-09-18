@@ -70,7 +70,12 @@ def build_native_option_success_plan(item: Mapping[str, Any], goal: Mapping[str,
     def coverage(value: str) -> int:
         return sum(1 << index for index, target in enumerate(targets) if get_option_reward((value.lower(),), (target,))[1] == 1)
 
-    all_groups = tuple(OptionCoverageGroup(name, tuple(f"click[{value}]" for value in values) + (GROUP_NONE_ACTION,), tuple(coverage(value) for value in values) + (0,)) for name, values in options.items())
+    # The page exposes one command per distinct value, even when the catalog
+    # contains multiple entries with the same normalized spelling.
+    all_groups = tuple(
+        OptionCoverageGroup(name, tuple(f"click[{value}]" for value in dict.fromkeys(values)) + (GROUP_NONE_ACTION,), tuple(coverage(value) for value in dict.fromkeys(values)) + (0,))
+        for name, values in options.items()
+    )
 
     def witnesses_for(fixed: dict[str, str]) -> tuple[int, dict[int, dict[str, str]]]:
         fixed_mask = 0

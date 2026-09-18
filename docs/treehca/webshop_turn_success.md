@@ -5,6 +5,9 @@ scores observations before the next policy action. It is not connected to the
 training rollout loop. The existing `webshop_success_probability.py` estimator
 and existing testbed entry points retain their behavior.
 
+TreeHCA training uses a separate specialization and actor-worker inference
+adapter, described in [`training_webshop_scoring.md`](training_webshop_scoring.md).
+
 ## Usage
 
 ```python
@@ -38,10 +41,13 @@ live environments. Native WebShop must already be importable, as it is when
 constructing the native environment. Run Python with `PYTHONPATH=.` in conda's
 `webshop` environment.
 
-Results preserve input order and length. Search-input observations, all product
-detail subpages (Description, Features, Attributes, Reviews), and terminated
-rollouts have `probability=None` and a `skipped_reason`. A scored zero means
-no retained full-reward path. Pass termination flags from the actual step
+Results preserve input order and length. Initial search observations and product
+detail subpages (Description, Features, Attributes, Reviews) return zero with
+`deferred_initial_search_page` or `deferred_item_sub_page`, respectively. These
+zeros are placeholders; training resolves them from the rollout tree as described
+in [`training_webshop_scoring.md`](training_webshop_scoring.md). Other unsupported
+states can return `probability=None` and a `skipped_reason`. A zero on a scored
+results/product page means no retained full-reward path. Pass termination flags from the actual step
 result: WebShop automatically resets its internal session after a purchase.
 
 ## Snapshot contract

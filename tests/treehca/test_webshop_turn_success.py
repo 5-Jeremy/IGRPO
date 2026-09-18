@@ -219,7 +219,8 @@ def test_skipped_states_and_query_mismatch(native):
     states = [replace(snapshot, page_type=page) for page in ["", "item_sub_page", "done"]]
     states.append(replace(snapshot, terminated=True))
     scores = scorer.score(states, policy_version=0)
-    assert all(score.probability is None and score.skipped_reason for score in scores)
+    assert [(score.probability, score.skipped_reason) for score in scores[:2]] == [(0.0, "deferred_initial_search_page"), (0.0, "deferred_item_sub_page")]
+    assert all(score.probability is None and score.skipped_reason for score in scores[2:])
     assert not engine.calls
     with pytest.raises(ValueError, match="same shopping query"):
         scorer.score([replace(snapshot, shopping_task="a different instruction")], policy_version=0)
@@ -286,6 +287,16 @@ def test_native_cross_group_alternatives_need_both_distributions(native):
     distributions = {group.name: {action: 0.5 for action in group.actions} for group in plan.groups}
     assert plan.aggregate(distributions) == pytest.approx(0.75)
     assert build_native_option_success_plan(item, goal, price, {"first": "color red"}).constant_probability == 1
+
+
+def test_native_plan_uses_one_action_for_repeated_catalog_value(native):
+    server, selected, _, _, _ = native
+    item = copy.deepcopy(selected.product)
+    goal = copy.deepcopy(selected.goal)
+    item["options"] = {"color": ["red", "red", "blue"]}
+    goal["goal_options"] = {"color": "red"}
+    plan = build_native_option_success_plan(item, goal, server.product_prices[item["asin"]], {})
+    assert plan.groups[0].actions == ("click[red]", "click[blue]", "none")
 
 
 def test_native_trivial_and_impossible_products_do_not_require_groups(native):

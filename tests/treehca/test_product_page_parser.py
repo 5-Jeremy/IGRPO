@@ -194,9 +194,8 @@ def test_parse_structural_looking_option_values_using_suffix():
     "groups,reason",
     [
         ((("size", ()),), "no recognized clickable values"),
-        ((("size", ("size", "large")),), "Repeated option"),
+        ((("size", ("size", "large")),), "collides with an admissible action"),
         ((("size", ("small",)), ("fit", ("small",))), "Duplicate admissible actions"),
-        ((("size", ("small", "fit")), ("fit", ("large",))), "Repeated option"),
         ((("style", ("buy now",)),), "Duplicate admissible actions"),
         ((("style", ("Buy Now",)),), "collides with a page control"),
     ],
@@ -205,6 +204,12 @@ def test_parse_rejects_ambiguous_option_groups(groups, reason):
     observation, actions = make_page(groups)
     with pytest.raises(ValueError, match=reason):
         parse_product_page_fields(observation, actions)
+
+
+def test_parse_collapses_repeated_values_within_one_group():
+    observation, actions = make_page((("size", ("small", "small", "large")),))
+    product = parse_product_page_fields(observation, tuple(dict.fromkeys(actions)))
+    assert product.option_groups == (ProductOptionGroup("size", ("small", "large")),)
 
 
 @pytest.mark.parametrize("bad_action", ["search[brush]", "click[unexplained value]"])
@@ -261,18 +266,17 @@ def test_batch_reports_both_failure_stages_and_preserves_successful_rows():
 
     assert len(results) == len(contexts)
     assert [result.index for result in results] == list(range(len(contexts)))
-    assert [result.index for result in results if result.error_stage is not None] == [0, 2, 3, 5]
+    assert [result.index for result in results if result.error_stage is not None] == [0, 5]
     for index in (0, 5):
         assert results[index].error_stage == "context"
         assert results[index].error_message
         assert results[index].context_parts is None
         assert results[index].product_fields is None
-    for index in (2, 3):
-        assert results[index].error_stage == "product"
-        assert results[index].context_parts == extract_product_page_contexts([contexts[index]])[0]
-        assert results[index].product_fields is None
-    assert "Repeated option names or values" in results[2].error_message
-    assert "Expected a product title" in results[3].error_message
+    assert results[2].product_fields.option_groups == (ProductOptionGroup("size", ("small",)),)
+    assert results[3].product_fields.title == ""
+    for index in (1, 2, 3, 4, 6):
+        assert results[index].error_stage is None
+        assert results[index].error_message is None
     for index in (1, 4, 6):
         assert results[index].error_stage is None
         assert results[index].error_message is None

@@ -122,7 +122,12 @@ class WebshopTurnSuccessScorer:
             if snapshot.catalog_key != self.source.catalog_key:
                 raise ValueError(f"Snapshot {index} belongs to a different catalog source")
             if snapshot.terminated or snapshot.page_type not in {"search_results", "item_page"}:
-                results.append(TurnSuccessProbability(None, "terminated" if snapshot.terminated else f"unsupported_page:{snapshot.page_type}"))
+                if snapshot.page_type == "": # Initial search page
+                    results.append(TurnSuccessProbability(0.0, "deferred_initial_search_page"))
+                elif snapshot.page_type == "item_sub_page":
+                    results.append(TurnSuccessProbability(0.0, "deferred_item_sub_page"))
+                else:
+                    results.append(TurnSuccessProbability(None, "terminated" if snapshot.terminated else f"unsupported_page:{snapshot.page_type}"))
                 continue
             parts = extract_product_page_contexts([snapshot.prompt])[0]
             if parts.shopping_task != snapshot.shopping_task or json.loads(snapshot.goal_json)["instruction_text"] != snapshot.shopping_task:

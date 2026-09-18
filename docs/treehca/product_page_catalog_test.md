@@ -38,9 +38,8 @@ conda run --no-capture-output -n webshop python -m pytest tests/treehca/test_pro
    `extract_product_page_contexts`. Pass each extracted observation/action list
    to `parse_product_page_fields`.
 6. Pass the same contexts to `parse_product_page_batch`. Check that every
-   original index and extracted context is preserved, all successful products
-   match the same structured expectations, and exactly the known failing rows
-   carry product-stage errors with no product fields. This remains part of the
+   original index and extracted context is preserved and all products match
+   the same structured expectations. This remains part of the
    same single test case and does not render any additional pages.
 
 The test uses the installed `webshop` environment and imports the real local
@@ -63,7 +62,7 @@ are not recovered from the text by another copy of the parser.
 | `title` | `product['Title']` |
 | `price_text` | `product['Price']` |
 | `rating_text` | `product['Rating']` |
-| `option_groups` | Ordered names and complete ordered value lists from `product['options']` |
+| `option_groups` | Ordered names and distinct clickable values from `product['options']` |
 | `navigation_controls` | `('Back to Search', '< Prev')` |
 | `detail_page_controls` | `('Description', 'Features')` |
 | `purchase_control` | `'Buy Now'` |
@@ -96,11 +95,10 @@ On a mismatch, diagnostics identify the ASIN, prompt variant, and field, with
 expected and actual values. Field mismatches and unexpected product-parser
 rejections are accumulated so the final failure reports all affected rows.
 
-## Three expected product-parser rejections
+## Three catalog anomalies handled by the parser
 
-The [agreed parser contract](product_page_parser_assumptions.md) rejects repeated
-option fragments and missing required fields. Inspection of the structured
-catalog identifies two products with repeated options:
+Inspection of the structured catalog identifies two products with repeated
+options:
 
 | ASIN | Repeated normalized size | Source of repetition |
 | --- | --- | --- |
@@ -108,35 +106,28 @@ catalog identifies two products with repeated options:
 | `B099WH1RTM` | `12x18 inch` | Raw values `12x18 Inch` and `12x18 inch` become equal after lowercasing. |
 
 The third product, `B09P71WY8C`, has `name: ""` in the source JSON and an empty
-`Title` after loading. Its rendered page has no title fragment. The test
-independently computes missing titles from the structured data and asserts that
-this is the only affected ASIN.
+`Title` after loading. Its rendered page has no title fragment. The parser
+returns an empty title. The test independently computes missing titles from
+the structured data and asserts that this is the only affected ASIN.
 
 The test computes repeated fragments from the structured data and asserts that
-the complete repetition map is exactly the table above. It requires a specific
-repeated-options `ValueError` for each duplicate-value product and a missing
-title/price/rating-structure `ValueError` for the untitled product, in both
-prompt variants. A different error, silent acceptance, or an additional failing
-product fails the test. These products are rendered and their outer contexts
-are fully checked; they are not skipped or marked `xfail`.
+the complete repetition map is exactly the table above. It checks that the two
+duplicate-value products expose one parsed choice per distinct click command
+and the untitled product exposes an empty title. All three pages are rendered
+and their outer contexts are fully checked.
 
 The final totals must be:
 
 - 1,000 products rendered.
 - 2,000 raw contexts extracted and checked.
-- 1,994 product parses checked against the complete expected fields: 997
-  products in each of two prompt variants.
-- 6 expected rejections: the two repeated-value products and the untitled
-  product in both variants.
+- 2,000 product parses checked against the complete expected fields.
 
-The batch wrapper is checked against those same totals: 2,000 aligned results,
-1,994 successful results, and exactly six reported failure indices. Its product
-failures must retain their successfully extracted context parts. The focused
-parser tests separately exercise batches containing context-stage failures.
+The batch wrapper is checked against those same totals: 2,000 aligned,
+successful results. The focused parser tests separately exercise batches
+containing context-stage failures.
 
-This validates the current conservative rejection contract. It does not assert
-that duplicate values within a group are fundamentally impossible to parse;
-supporting them would be a separate contract change.
+This validates the parser's treatment of the three catalog anomalies. Distinct
+display entries with the same click command count as one actionable choice.
 
 ## Coverage limits
 

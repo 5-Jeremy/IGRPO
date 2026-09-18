@@ -691,11 +691,18 @@ def make_envs(config):
                     'file_path': file_path,
                     'attr_path': attr_path
                     }
-        _envs = build_webshop_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
+        training_manager = WebshopEnvironmentManager
+        worker_options = {}
+        if config.algorithm.adv_estimator == "treehca":
+            from treehca.training_webshop_env import TreeHCAWebshopEnvironmentManager, TreeHCAWebshopWorker
+
+            training_manager = TreeHCAWebshopEnvironmentManager
+            worker_options["worker_class"] = TreeHCAWebshopWorker
+        _envs = build_webshop_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker, **worker_options)
         _val_envs = build_webshop_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
 
         projection_f = partial(webshop_projection)
-        envs = WebshopEnvironmentManager(_envs, projection_f, config)
+        envs = training_manager(_envs, projection_f, config)
         val_envs = WebshopEnvironmentManager(_val_envs, projection_f, config)
         import time
         time.sleep((config.data.train_batch_size * group_n + config.data.val_batch_size) * 0.1) # wait for the envs to be ready

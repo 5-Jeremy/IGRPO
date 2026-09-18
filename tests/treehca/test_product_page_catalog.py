@@ -20,7 +20,7 @@ _CONTROLS = ("Back to Search", "< Prev", "Description", "Features", "Buy Now")
 def test_all_1000_product_pages(monkeypatch):
     """Render every item and verify both parsers, with and without prompt history.
 
-    The independent oracle and expected invalid-page rejections are described
+    The independent oracle and catalog anomalies are described
     in docs/treehca/product_page_catalog_test.md.
     """
     monkeypatch.syspath_prepend(str(_WEBSHOP))
@@ -78,7 +78,7 @@ def test_all_1000_product_pages(monkeypatch):
             expected_products.append(
                 {
                     "navigation_controls": ("Back to Search", "< Prev"),
-                    "option_groups": tuple({"name": name, "values": tuple(values), "correct_options": ()} for name, values in product["options"].items()),
+                    "option_groups": tuple({"name": name, "values": tuple(dict.fromkeys(values)), "correct_options": ()} for name, values in product["options"].items()),
                     "title": product["Title"],
                     "price_text": product["Price"],
                     "rating_text": product["Rating"],
@@ -102,8 +102,6 @@ def test_all_1000_product_pages(monkeypatch):
     }
     missing_titles = {product["asin"] for product in products if not product["Title"]}
     assert missing_titles == {"B09P71WY8C"}
-    rejection_reasons = {asin: "Repeated option names or values" for asin in repeated_options}
-    rejection_reasons.update({asin: "Expected a product title, Price: field, and Rating: field" for asin in missing_titles})
     # Real rollouts retain tasks from the initial search page; extract_task is not used on product pages.
     manager.tasks = tasks
     observations = manager.format_obs(raw_observations)
@@ -118,7 +116,7 @@ def test_all_1000_product_pages(monkeypatch):
     parsed_contexts = extract_product_page_contexts(contexts)
     assert len(parsed_contexts) == 2000
 
-    failures, successful_parses, expected_rejections = [], 0, 0
+    failures, successful_parses = [], 0
     for index, parts in enumerate(parsed_contexts):
         row = index % len(products)
         with_history = index >= len(products)
@@ -146,13 +144,7 @@ def test_all_1000_product_pages(monkeypatch):
         try:
             fields = parse_product_page_fields(parts.current_observation, parts.admissible_actions)
         except ValueError as error:
-            if asin in rejection_reasons and rejection_reasons[asin] in str(error):
-                expected_rejections += 1
-            else:
-                failures.append(f"{label}: unexpected product parse rejection: {error}")
-            continue
-        if asin in rejection_reasons:
-            failures.append(f"{label}: expected rejection: {rejection_reasons[asin]}")
+            failures.append(f"{label}: unexpected product parse rejection: {error}")
             continue
         actual_fields = asdict(fields)
         for field, expected in expected_products[row].items():
@@ -162,23 +154,16 @@ def test_all_1000_product_pages(monkeypatch):
 
     if failures:
         pytest.fail("\n".join(failures))
-    assert successful_parses == 1994
-    assert expected_rejections == 6
+    assert successful_parses == 2000
 
     # The tolerant wrapper must report exactly the known failures without losing or shifting rows.
     results = parse_product_page_batch(contexts)
     assert len(results) == len(contexts)
-    expected_failed_indices = [index for index in range(len(contexts)) if products[index % len(products)]["asin"] in rejection_reasons]
-    assert [result.index for result in results if result.error_stage is not None] == expected_failed_indices
+    assert all(result.error_stage is None for result in results)
     for index, result in enumerate(results):
         row = index % len(products)
         asin = products[row]["asin"]
         assert result.index == index
         assert result.context_parts == parsed_contexts[index], (asin, index)
-        if asin in rejection_reasons:
-            assert result.error_stage == "product", (asin, index)
-            assert rejection_reasons[asin] in result.error_message, (asin, index)
-            assert result.product_fields is None, (asin, index)
-        else:
-            assert result.error_stage is None and result.error_message is None, (asin, index)
-            assert asdict(result.product_fields) == expected_products[row], (asin, index)
+        assert result.error_stage is None and result.error_message is None, (asin, index)
+        assert asdict(result.product_fields) == expected_products[row], (asin, index)

@@ -258,7 +258,10 @@ algorithm:
     prob_diff_mode: True
     stable_steps: 150 # more stable
     stable_method: "normal" # normal: add cummulative info gain; threshold: >=0.5-->1.0
-  treehca: # TreeHCA reuses the igrpo block above for branching, these knobs only affect credit assignment
+  treehca: # TreeHCA uses igrpo branching plus environment-specific pseudo scoring
+    pseudo_scorer: auto # auto / answer_block / webshop; auto detects env.env_name
+    webshop_path_probability_threshold: 1.0e-3
+    webshop_probe_batch_size: 32 # unique teacher-forcing rows before worker padding
     prob_floor: 1.0e-6 # clamp p_gt before inverting it
     weight_temp: 1.0 # w_c = (1 / p_gt(c)) ** weight_temp
     max_weight_ratio: -1.0 # truncate w_c at this multiple of the mean sibling weight; -1 disables

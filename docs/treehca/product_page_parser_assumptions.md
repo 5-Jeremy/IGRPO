@@ -67,14 +67,16 @@ parse_product_page_fields(
   layout. Description/Features subpages, search pages, and purchase-result pages
   are outside this function's contract.
 - The expected fragment sequence is `Back to Search`, `< Prev`, zero or more
-  option groups, title, `Price: ...`, `Rating: ...`, `Description`, `Features`,
+  option groups, optional title, `Price: ...`, `Rating: ...`, `Description`, `Features`,
   optional `Attributes`, and `Buy Now`.
 - The fixed trailing sequence anchors title, price, and rating. A price-like
   option value therefore does not automatically become a price-field boundary.
 - Price and rating remain strings after removal of their labels. No numeric
   conversion is performed; for example, `N.A.` remains `N.A.`.
-- Options retain their names, values, and display order. No options yields an
-  empty tuple. Selected values are never inferred.
+- Options retain their names, distinct clickable values, and display order.
+  Repeated values within one group collapse to one choice, matching WebShop's
+  deduplicated click commands. No options yields an empty tuple. Selected values
+  are never inferred.
 - Duplicate commands, missing control commands, unexplained actions, empty
   required fields, and unsupported or detectably ambiguous structures raise
   `ValueError`.
@@ -174,16 +176,19 @@ lowercases page-control commands and preserves option values in their commands.
 Consequently, page controls are checked through their lowercase command names,
 while an option value requires the exact command `click[{value}]`.
 
-The parser rejects repeated option fragments, group names colliding with
-commands, and options colliding with page controls. These cases can hide group
-boundaries or give multiple meanings to the same click command. Every supplied
-action must correspond to a parsed option value or expected page control.
+The parser rejects repeated group names, values shared across recognized groups,
+group names colliding with commands, and options colliding with page controls.
+Repeated values within one group produce one choice. Every supplied action must
+correspond to a parsed option value or expected page control. An empty catalog
+title produces an empty `title` field when no title fragment is rendered.
 
 This remains a heuristic over an unescaped text representation. It cannot prove
 that the caller supplied the correct action list. For example, removing a
-value's action could make that value look like another group name. Rejection of
-detectable ambiguities is not a guarantee that every corrupted input is
-detectable. Environment metadata would be needed to eliminate this limitation.
+value's action could make that value look like another group name. A group name
+that also appears as a prior group's clickable value cannot be distinguished
+from a duplicate value using prompt text alone. Rejection of detectable
+ambiguities is not a guarantee that every corrupted input is detectable.
+Environment metadata would be needed to eliminate this limitation.
 
 ## Text preservation
 
@@ -227,6 +232,6 @@ of unexpected exceptions.
 
 The additional [catalog test](product_page_catalog_test.md) renders all 1,000
 products through WebShop's actual page and prompt formatting methods in one
-test case. Its independent field checks and three expected invalid-page
-rejections (two duplicate-value products and one untitled product) are explained
+test case. Its independent field checks and handling of three catalog
+anomalies (two duplicate-value products and one untitled product) are explained
 in that document.

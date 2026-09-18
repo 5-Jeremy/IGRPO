@@ -582,6 +582,29 @@ class TrajectoryCollector:
         node_management = TrajectoryNodeStateManagement(batch_size, envs=envs, obs=obs)
         node_management.assign_group_uids(self.config.env.rollout.n)
 
+        webshop_scorer = None
+        webshop_deferred = None
+        if self.config.algorithm.adv_estimator == AdvantageEstimator.TREEHCA:
+            from treehca.training_webshop_scoring import WebshopInfoGainScorer, resolve_treehca_scorer
+
+            if resolve_treehca_scorer(self.config) == "webshop":
+                if not hasattr(envs, "scoring_payloads"):
+                    raise ValueError("TreeHCA webshop scoring requires TreeHCAWebshopEnvironmentManager")
+                webshop_scorer = WebshopInfoGainScorer(
+                    self.tokenizer, actor_rollout_wg,
+                    max_model_len=self.config.actor_rollout_ref.rollout.get("max_model_len") or (self.config.data.max_prompt_length + self.config.data.max_response_length),
+                    path_probability_threshold=self.config.algorithm.treehca.get("webshop_path_probability_threshold", 1e-3),
+                    batch_size=self.config.algorithm.treehca.get("webshop_probe_batch_size", 32),
+                    apply_chat_template_kwargs=self.config.data.get("apply_chat_template_kwargs", {}),
+                )
+                from treehca.webshop_deferred_scores import WebshopDeferredScores
+
+                webshop_deferred = WebshopDeferredScores(
+                    node_management.uid_batch,
+                    prob_diff_mode=self.config.algorithm.igrpo.prob_diff_mode,
+                    prob_floor=self.config.algorithm.treehca.prob_floor,
+                )
+        # A scorer lives for one rollout collection, while the policy is fixed.
         total_batch_list = []
         node_uid2info_gain_sum = {}
         total_infos = []
@@ -625,6 +648,7 @@ class TrajectoryCollector:
             text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
             batch.non_tensor_batch['text_actions'] = text_actions
 
+            previous_page_types = node_management.envs.scoring_page_types() if webshop_scorer is not None else None
             next_obs, rewards, dones, infos = node_management.envs.step(text_actions)
             node_management.obs = next_obs
 
@@ -656,12 +680,32 @@ class TrajectoryCollector:
                                             obs=node_management.obs, 
                                             original_gen_batch_index=node_management.original_gen_batch_index)
                 info_gain_batch.batch["prompts"] = info_gain_batch.batch.pop("input_ids")
-                info_gain_batch, reorder_index = adjust_batch(config=self.config, data=info_gain_batch, mode="copy", info_gain_compute=True)
-                info_gain_batch = compute_answer_block_avg_log_prob(batch=info_gain_batch, 
-                                                                    tokenizer=self.tokenizer, 
-                                                                    actor_rollout_wg=actor_rollout_wg,
-                                                                    think=False,
-                                                                    response_length=self.config.data.max_response_length)
+                if webshop_scorer is not None:
+                    info_gain_batch.non_tensor_batch.update(
+                        webshop_scoring_payload=node_management.envs.scoring_payloads(next_obs["text"], previous_page_types, active_masks, dones),
+                        webshop_active=np.asarray(active_masks, dtype=bool),
+                        webshop_terminated=np.asarray(dones, dtype=bool),
+                        webshop_won=np.asarray([info["won"] for info in infos], dtype=bool),
+                    )
+                    # The adapter pads its generated probes, not observation slots.
+                    reorder_index = torch.arange(batch_size)
+                    info_gain_batch = webshop_scorer.compute(info_gain_batch, policy_version=0)
+                    webshop_scorer.require_active_scores(info_gain_batch)
+                    batch.non_tensor_batch["webshop_success_probability"] = info_gain_batch.non_tensor_batch["webshop_success_probability"]
+                    batch.non_tensor_batch["webshop_skipped_reason"] = info_gain_batch.non_tensor_batch["webshop_skipped_reason"]
+                    # Only inactive rows can still be NaN after validation.
+                    info_gain_batch.batch["avg_ans_log_probs"].nan_to_num_(nan=0.0, neginf=-float("inf"))
+                    # Preserve raw log scores: deferred means are computed in log space.
+                    batch.non_tensor_batch["avg_ans_log_probs"] = torch_to_numpy(info_gain_batch.batch["avg_ans_log_probs"], is_object=False).copy()
+                    if not self.config.algorithm.igrpo.prob_diff_mode:
+                        info_gain_batch.batch["avg_ans_log_probs"].clamp_(min=np.log(self.config.algorithm.treehca.prob_floor))
+                else:
+                    info_gain_batch, reorder_index = adjust_batch(config=self.config, data=info_gain_batch, mode="copy", info_gain_compute=True)
+                    info_gain_batch = compute_answer_block_avg_log_prob(batch=info_gain_batch,
+                                                                        tokenizer=self.tokenizer,
+                                                                        actor_rollout_wg=actor_rollout_wg,
+                                                                        think=False,
+                                                                        response_length=self.config.data.max_response_length)
                 avg_ans_log_probs = info_gain_batch.batch.pop("avg_ans_log_probs")
                 del info_gain_batch
                 info_gain_sum = torch.exp(avg_ans_log_probs) if self.config.algorithm.igrpo.prob_diff_mode else avg_ans_log_probs
@@ -673,17 +717,20 @@ class TrajectoryCollector:
             info_gain_sum = info_gain_sum[:batch_size]
             batch.non_tensor_batch["info_gain_sum"] = info_gain_sum
             batch.non_tensor_batch["info_gain"] = np.zeros_like(info_gain_sum)
-            for i in range(batch_size):
-                if active_masks[i]:
-                    info_gain_sum = batch.non_tensor_batch["info_gain_sum"][i]
-                    parent_node_uid = batch.non_tensor_batch['parent_node_uid'][i]
-                    if parent_node_uid != "root":
-                        assert parent_node_uid in node_uid2info_gain_sum, f"Missing key in node_uid2info_gain_sum: {parent_node_uid}"
-                        parent_info_gain_sum = node_uid2info_gain_sum[parent_node_uid]
-                    else:
-                        # we assume that without any search, info gain is 0.
-                        parent_info_gain_sum = 0.0
-                    batch.non_tensor_batch["info_gain"][i] = info_gain_sum - parent_info_gain_sum
+            if webshop_deferred is not None:
+                webshop_deferred.update(batch, active_masks, node_uid2info_gain_sum)
+            else:
+                for i in range(batch_size):
+                    if active_masks[i]:
+                        info_gain_sum = batch.non_tensor_batch["info_gain_sum"][i]
+                        parent_node_uid = batch.non_tensor_batch['parent_node_uid'][i]
+                        if parent_node_uid != "root":
+                            assert parent_node_uid in node_uid2info_gain_sum, f"Missing key in node_uid2info_gain_sum: {parent_node_uid}"
+                            parent_info_gain_sum = node_uid2info_gain_sum[parent_node_uid]
+                        else:
+                            # we assume that without any search, info gain is 0.
+                            parent_info_gain_sum = 0.0
+                        batch.non_tensor_batch["info_gain"][i] = info_gain_sum - parent_info_gain_sum
 
             # dynamically change the node_management, according to the info gain
             node_management.deactivate(torch_to_numpy(dones, is_object=False))
@@ -702,6 +749,8 @@ class TrajectoryCollector:
             node_management.deactivate(expand_num == 0)
 
             batch_list: list[dict] = to_list_of_dict(batch)
+            if webshop_deferred is not None:
+                webshop_deferred.register_rows([batch_list[i] for i in range(batch_size) if active_masks[i]])
             for i in range(batch_size):
                 if active_masks[i]:
                     total_batch_list.append(batch_list[i])
