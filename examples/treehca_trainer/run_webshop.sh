@@ -1,4 +1,5 @@
 set -x
+set -o pipefail
 ENGINE=${1:-vllm}
 ulimit -u 65536
 # export VLLM_ATTENTION_BACKEND=XFORMERS
@@ -20,6 +21,7 @@ PROJECT_NAME=${PROJECT_NAME:-ICLR}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-treehca-webshop}
 RUN_DIR=${RUN_DIR:-runs/$PROJECT_NAME/$EXPERIMENT_NAME}
 DEBUG_DIR=${DEBUG_DIR:-$RUN_DIR/debug_batches}
+mkdir -p "$RUN_DIR"
 
 # mode="mean_norm" # "mean_norm" or "mean_std_norm"
 run_timestamp=$(date -u +'%Y%m%dT%H%M%S.%N')-$$
@@ -36,7 +38,7 @@ python3 -m examples.data_preprocess.prepare \
 # TreeHCA reuses the IGRPO branching scheme (algorithm.igrpo.*) and replaces only
 # the credit assignment (algorithm.treehca.*). reward_mode must stay avg/max so the
 # batch keeps one row per tree node instead of unrolled root-to-leaf chains.
-python3 -m verl.trainer.main_ppo \
+python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=treehca \
     algorithm.igrpo.prob_diff_mode=True \
     algorithm.igrpo.gamma=1.0 \
@@ -50,6 +52,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.treehca.subtree_size_weight=True \
     algorithm.treehca.leaf_baseline='group' \
     algorithm.treehca.norm_adv_by_std=True \
+    algorithm.treehca.webshop_probe_batch_size=128 \
     actor_rollout_ref.rollout.info_gain_compute_log_prob_micro_batch_size_per_gpu=32 \
     reward_model.reward_manager='tree_structure' \
     data.train_files=agent_system/environments/env_package/webshop/train_data/text/train.parquet \
@@ -105,13 +108,10 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=75 \
     trainer.test_freq=10 \
-    trainer.debug_freq=10 \
-    trainer.debug_dir=$DEBUG_DIR \
     trainer.total_epochs=150 \
     trainer.max_actor_ckpt_to_keep=3 \
     trainer.max_critic_ckpt_to_keep=3 \
-    trainer.resume_mode=auto \
-    hydra.run.dir='./output/${now:%Y-%m-%d}/${now:%H-%M-%S}' \
+    trainer.resume_mode=disable \
     hydra.output_subdir=null \
-    trainer.val_before_train=True $@
-# NOTE: 1 epoch appears to correspond to 1 step; this does not seem right
+    trainer.val_before_train=True "$@" \
+    2>&1 | tee "$RUN_DIR/logs/$run_timestamp/train.log"
