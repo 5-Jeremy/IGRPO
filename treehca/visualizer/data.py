@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import colorsys
+import hashlib
 import json
 import math
 import re
@@ -159,6 +161,23 @@ def numeric(value):
         return None
 
 
+def page_type_style(node: Node):
+    """Stable categorical colors across files, including the native empty index name."""
+    if node.uid == "root":
+        return "Synthetic root", "#f1f5f9"
+    page = node.records[0].get("page_type") if node.records else None
+    if page is None:
+        return "Missing page type", "#cbd5e1"
+    page = str(page)
+    colors = {"": "#93c5fd", "index": "#93c5fd", "search_results": "#fcd34d", "item_page": "#6ee7b7", "item_sub_page": "#c4b5fd", "done": "#fda4af"}
+    if page in colors:
+        return 'Initial search ("")' if page == "" else page, colors[page]
+    # Future page categories keep the same color without depending on discovery order.
+    hue = int.from_bytes(hashlib.sha256(page.encode()).digest()[:2], "big") / 65536
+    color = "#" + "".join(f"{round(channel * 255):02x}" for channel in colorsys.hls_to_rgb(hue, 0.78, 0.65))
+    return page, color
+
+
 def graph_elements(tree: Tree, metric: str | None = None):
     """Fixed depth rows and centered parents, matching the reference viewer."""
     positions = {}
@@ -186,7 +205,9 @@ def graph_elements(tree: Tree, metric: str | None = None):
         kind = "root" if uid == "root" else ("internal" if node.children else "leaf")
         color = {"root": "#56b4e9", "internal": "#e69f00", "leaf": "#009e73"}[kind]
         foreground = "#0f172a"
-        if metric:
+        if metric == "page_type":
+            _, color = page_type_style(node)
+        elif metric:
             value = values[uid]
             color = "#e2e8f0"
             if value is not None and limits:

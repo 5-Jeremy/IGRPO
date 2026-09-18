@@ -31,6 +31,12 @@ Metric colors normalize finite values within the selected tree; missing and
 nonfinite values are gray. Leaves describe graph structure, not environment
 termination, which is not present in the example logs.
 
+Select **Page type** to color nodes categorically by their saved `page_type`
+(the page before the action). Colors stay consistent across trees and files;
+the legend lists categories present in the selected tree. The empty-string page
+type is labeled **Initial search ("")**, separately from missing data and the
+synthetic root. As with numeric colors, duplicate nodes use their first record.
+
 Click a node to inspect saved fields, including unknown future fields, nested
 objects, arrays, and full numeric precision. Node/parent/child UIDs, ancestry
 paths, and JSONL line numbers are omitted from the details pane. Duplicate saved

@@ -94,6 +94,27 @@ def test_partial_json_reports_error_and_can_be_retried(tmp_path):
     assert cache.load("1.jsonl").record_count == 1
 
 
+def test_page_type_colors_and_legend(tmp_path):
+    from treehca.visualizer.app import create_app
+    from treehca.visualizer.data import page_type_style
+
+    rows = [row("a", page_type=""), row("b", ["a"], page_type="search_results"), row("c", ["b", "a"], page_type="item_page"), row("d", ["c", "b", "a"], page_type="item_sub_page"), row("e", ["c", "b", "a"]), row("f", ["c", "b", "a"], page_type="future_page")]
+    tree = load_file(write_rows(tmp_path / "1.jsonl", rows)).trees[0]
+    elements, limits = graph_elements(tree, "page_type")
+    colors = {e["data"]["id"]: e["data"]["color"] for e in elements if "position" in e}
+    assert limits is None
+    assert len({colors[uid] for uid in ("root", "a", "b", "c", "d", "e")}) == 6
+    assert page_type_style(tree.nodes["a"])[0] == 'Initial search ("")'
+    assert colors["f"] == page_type_style(tree.nodes["f"])[1]
+    app = create_app(tmp_path)
+    select = next(v["callback"].__wrapped__ for k, v in app.callback_map.items() if "metric.options" in k)
+    assert {"label": "Page type", "value": "page_type"} in select("1.jsonl", 0, 0)[-1]
+    render = next(v["callback"].__wrapped__ for k, v in app.callback_map.items() if "legend.children" in k)
+    _, _, legend = render({"file": "1.jsonl", "tree": 0}, "page_type")
+    labels = [entry.children[-1] for entry in legend[:-1]]
+    assert {"item_page", "item_sub_page", "search_results", "Missing page type", "Synthetic root", "future_page"} <= set(labels)
+
+
 def test_dash_layout_and_file_callback(tmp_path):
     pytest.importorskip("dash_cytoscape")
     from treehca.visualizer.app import create_app

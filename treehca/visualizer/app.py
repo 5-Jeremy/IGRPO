@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 
-from .data import FileCache, discover_files, graph_elements, numeric
+from .data import FileCache, discover_files, graph_elements, numeric, page_type_style
 from .presentation import HIDDEN_COLOR_FIELDS, PROMPT_FIELDS, detail_fields, prompt_sections, visible_fields
 
 GRAPH_STYLE = [
@@ -31,6 +31,8 @@ GRAPH_STYLE = [
     {"selector": "node:selected", "style": {"border-width": 6, "border-color": "#111827"}},
     {"selector": "edge", "style": {"curve-style": "bezier", "width": 3, "line-color": "#475569", "target-arrow-color": "#0f172a", "target-arrow-shape": "triangle", "target-distance-from-node": 4, "arrow-scale": 1.6}},
 ]
+
+COLOR_OPTIONS = [{"label": "Structural type", "value": ""}, {"label": "Page type", "value": "page_type"}]
 
 
 def format_value(value):
@@ -103,7 +105,7 @@ def create_app(log_dir: Path):
                             html.Div(
                                 [
                                     html.Div(id="legend", className="legend"),
-                                    html.Label(["Node color", dcc.Dropdown(id="metric", options=[{"label": "Structural type", "value": ""}], value="", clearable=False)], className="color-mode-control"),
+                                    html.Label(["Node color", dcc.Dropdown(id="metric", options=COLOR_OPTIONS, value="", clearable=False)], className="color-mode-control"),
                                 ],
                                 className="graph-controls",
                             ),
@@ -196,7 +198,7 @@ def create_app(log_dir: Path):
 
     @app.callback(Output("view", "data"), Output("warning", "children"), Output("tree-stats", "children"), Output("metric", "options"), Input("file", "value"), Input("tree", "value"), Input("refresh", "n_clicks"))
     def select_tree(filename, index, clicks):
-        empty = (None, "", [], [{"label": "Structural type", "value": ""}])
+        empty = (None, "", [], COLOR_OPTIONS)
         if filename is None or index is None:
             return empty
         try:
@@ -204,7 +206,7 @@ def create_app(log_dir: Path):
         except (ValueError, OSError, UnicodeError, IndexError):
             return empty
         fields = sorted({key for node in tree.nodes.values() for record in node.records for key, value in record.items() if key not in HIDDEN_COLOR_FIELDS and numeric(value) is not None})
-        return {"file": filename, "tree": index, "refresh": clicks}, " ".join(tree.warnings), table(tree.statistics), [{"label": "Structural type", "value": ""}] + [{"label": f, "value": f} for f in fields]
+        return {"file": filename, "tree": index, "refresh": clicks}, " ".join(tree.warnings), table(tree.statistics), COLOR_OPTIONS + [{"label": f, "value": f} for f in fields if f != "page_type"]
 
     @app.callback(Output("graph", "elements"), Output("graph", "layout"), Output("legend", "children"), Input("view", "data"), Input("metric", "value"))
     def render_graph(view, metric):
@@ -212,7 +214,11 @@ def create_app(log_dir: Path):
             metric = None
         tree = get_tree(view)
         elements, limits = graph_elements(tree, metric) if tree else ([], None)
-        if metric:
+        if metric == "page_type":
+            categories = sorted({page_type_style(node) for node in tree.nodes.values()}) if tree else []
+            legend = [html.Span([html.I(className="legend-swatch", style={"backgroundColor": color}), label]) for label, color in categories]
+            legend.append(html.Span("Page before action · first record per node"))
+        elif metric:
             legend = f"{metric}: {limits[0]:.6g} → {limits[1]:.6g} · darker = higher; gray = missing/nonfinite" if limits else f"{metric}: no finite values"
             legend += " · first record per node"
         else:
