@@ -102,12 +102,31 @@ def prepare_results_page_answer_probe(
         action,
         assistant_response_prefix=assistant_response_prefix,
     )
-    return prepare_tagged_answer_probe(prompt, pseudo_rollout[len(prompt) :], tokenizer, prompt_token_ids=prompt_token_ids)
+    return prepare_tagged_answer_probe(prompt, pseudo_rollout[len(prompt) :], tokenizer, prompt_token_ids=prompt_token_ids, skip_answer_prefix="click[")
 
 
-def prepare_tagged_answer_probe(prompt: str, response: str, tokenizer: Any, *, prompt_token_ids: tuple[int, ...] | None = None) -> ResultsPageAnswerProbe:
-    """Score only the answer text in a teacher-forced tagged response."""
-    # Tokenize the response independently, as for search-result actions.
+def prepare_tagged_answer_probe(prompt: str, response: str, tokenizer: Any, *, prompt_token_ids: tuple[int, ...] | None = None, skip_answer_prefix: str = "") -> ResultsPageAnswerProbe:
+    """Score answer tokens overlapping the text after an optional prefix."""
+    answer_start = response.rfind("<answer>")
+    answer_end = response.find("</answer>", answer_start + len("<answer>"))
+    if answer_start < 0 or answer_end < 0:
+        raise ValueError("Pseudo-rollout response must contain a complete <answer> block")
+    answer_text_start = answer_start + len("<answer>")
+    if not response.startswith(skip_answer_prefix, answer_text_start):
+        raise ValueError("Answer does not start with the expected unscored prefix")
+    return _prepare_response_probe(prompt, response, tokenizer, (answer_text_start + len(skip_answer_prefix), answer_end), prompt_token_ids=prompt_token_ids)
+
+
+def prepare_response_suffix_probe(prompt: str, response_prefix: str, choice: str, tokenizer: Any, *, prompt_token_ids: tuple[int, ...] | None = None) -> ResultsPageAnswerProbe:
+    """Teacher-force a response and score tokens overlapping its choice suffix."""
+    if not choice:
+        raise ValueError("Pseudo-rollout choice must not be empty")
+    response = response_prefix + choice
+    return _prepare_response_probe(prompt, response, tokenizer, (len(response_prefix), len(response)), prompt_token_ids=prompt_token_ids)
+
+
+def _prepare_response_probe(prompt: str, response: str, tokenizer: Any, score_interval: tuple[int, int], *, prompt_token_ids: tuple[int, ...] | None = None) -> ResultsPageAnswerProbe:
+    # Tokenize the complete response so tokens crossing the score boundary count.
     encoded_response = tokenizer(
         response,
         return_tensors="pt",
@@ -121,14 +140,9 @@ def prepare_tagged_answer_probe(prompt: str, response: str, tokenizer: Any, *, p
     if not isinstance(offsets, torch.Tensor) or offsets.shape != (*response_ids.shape, 2):
         raise ValueError("Tokenizer must return offset_mapping with shape [1, response_length, 2]")
 
-    answer_start = response.rfind("<answer>")
-    answer_end = response.find("</answer>", answer_start + len("<answer>"))
-    if answer_start < 0 or answer_end < 0:
-        raise ValueError("Pseudo-rollout response must contain a complete <answer> block")
-    answer_interval = (answer_start + len("<answer>"), answer_end)
-    answer_token_indices = [index for index, (start, end) in enumerate(offsets[0].tolist()) if start != end and max(start, answer_interval[0]) < min(end, answer_interval[1])]
+    answer_token_indices = [index for index, (start, end) in enumerate(offsets[0].tolist()) if start != end and max(start, score_interval[0]) < min(end, score_interval[1])]
     if not answer_token_indices:
-        raise ValueError(f"No tokens overlap the answer span {answer_interval}")
+        raise ValueError(f"No tokens overlap the answer span {score_interval}")
 
     if prompt_token_ids is None:
         prompt_token_ids = tuple(_tokenize_prompt(tokenizer, prompt))
@@ -143,11 +157,11 @@ def compute_results_page_answer_probability(
     *,
     assistant_response_prefix: str = "",
 ) -> torch.Tensor:
-    """Return joint action-token probability, retaining the original prompt.
+    """Return joint probability for action tokens overlapping text after ``click[``.
 
-    Sum log probabilities for response tokens overlapping the final answer's
-    action text. Neither the answer tags nor an optional thinking prefix enter
-    that sum, although they remain part of the conditioning context.
+    The ``click[`` prefix contributes only when a token crosses into the
+    remaining action text. Answer tags and an optional thinking prefix remain
+    conditioning context but do not enter the probability sum.
     """
     probe = prepare_results_page_answer_probe(prompt, action, tokenizer, assistant_response_prefix=assistant_response_prefix)
     if actor_rollout_wg is None or not callable(getattr(actor_rollout_wg, "compute_log_prob", None)):

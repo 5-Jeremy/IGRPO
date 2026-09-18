@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from treehca.pseudo_rollout_results_page import build_results_page_pseudo_rollout, compute_results_page_answer_probability
+from treehca.pseudo_rollout_results_page import build_results_page_pseudo_rollout, compute_results_page_answer_probability, prepare_results_page_answer_probe
 from verl import DataProto
 
 
@@ -78,7 +78,7 @@ def test_requires_an_exact_admissible_action(prompt):
         build_results_page_pseudo_rollout(prompt, "click[ITEM-1]")
 
 
-def test_computes_joint_probability_for_only_action_tokens(prompt):
+def test_computes_joint_probability_without_click_prefix_tokens(prompt):
     tokenizer = _CharacterTokenizer()
     worker = _FakeActorRolloutWorkerGroup()
     thinking = "<think>Item 1 is cheaper.</think>\n"
@@ -92,13 +92,35 @@ def test_computes_joint_probability_for_only_action_tokens(prompt):
     )
 
     response = thinking + "<answer>click[item-1]</answer>"
-    answer_start = response.index("click[item-1]")
-    answer_indices = torch.arange(answer_start, answer_start + len("click[item-1]"))
+    answer_start = response.index("item-1]")
+    answer_indices = torch.arange(answer_start, answer_start + len("item-1]"))
     expected_joint_log_probability = (-(answer_indices + 1).double() / 10).sum()
     assert probability == pytest.approx(expected_joint_log_probability.exp())
     assert tokenizer.chat_template_calls == [[{"role": "user", "content": prompt}]]
     assert worker.batch.batch["responses"].shape == (1, len(response))
     assert worker.batch.batch["input_ids"].shape[1] > len(response)
+
+
+def test_counts_token_that_merges_click_prefix_with_action_text(prompt):
+    class MergedTokenizer(_CharacterTokenizer):
+        def __call__(self, text, **kwargs):
+            encoded = super().__call__(text, **kwargs)
+            start = text.index("click[item-1]")
+            merge_start = start + len("click")
+            end = start + len("click[i")
+            ids = encoded["input_ids"][0].tolist()
+            offsets = encoded["offset_mapping"][0].tolist()
+            encoded["input_ids"] = torch.tensor([ids[:merge_start] + [ids[merge_start]] + ids[end:]])
+            encoded["offset_mapping"] = torch.tensor([offsets[:merge_start] + [[merge_start, end]] + offsets[end:]])
+            return encoded
+
+    probe = prepare_results_page_answer_probe(prompt, "click[item-1]", MergedTokenizer())
+    response = "<answer>click[item-1]</answer>"
+    merged_index = response.index("click[item-1]") + len("click")
+
+    assert probe.answer_token_indices[0] == merged_index
+    assert len(probe.answer_token_indices) == len("item-1]")
+    assert all(index >= merged_index for index in probe.answer_token_indices)
 
 
 def test_probability_rejects_malformed_log_prob_output(prompt):

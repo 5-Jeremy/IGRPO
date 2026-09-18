@@ -196,9 +196,10 @@ def test_training_product_probe_uses_exact_names_and_joint_answer_tokens(native_
     assert "letter" not in rendered_prompt
     for name, answer in zip(probe.option_names, probe.answer_probes):
         response = tokenizer.decode(answer.response_token_ids)
-        assert response == f"<answer>{name}</answer>"
+        assert response == f"<think> The best choice for the {group.name} group is {name}"
         assert answer.answer_token_indices
-        assert all("answer" not in tokenizer.decode([answer.response_token_ids[index]]) for index in answer.answer_token_indices)
+        scored_text = tokenizer.decode([answer.response_token_ids[index] for index in answer.answer_token_indices])
+        assert scored_text in {name, f" {name}"}
     actor = FakeActor()
     scores = TrainingPseudoProbeScorer(tokenizer, actor, max_model_len=32768).score(probes)[0]
     raw = [math.prod((token + 1) / 1_000_000 for token in (answer.response_token_ids[index] for index in answer.answer_token_indices)) for answer in probe.answer_probes]

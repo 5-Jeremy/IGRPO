@@ -101,12 +101,15 @@ environments retain their existing zero root baseline and gain computation.
 [`training_pseudo_probes.py`](../../treehca/training_pseudo_probes.py) calls
 `actor_rollout_wg.compute_log_prob` using the current training actor:
 
-- Results probes sum the action-token log probabilities, then exponentiate.
+- Results probes sum log probabilities for tokens overlapping the action text
+  after `click[`, then exponentiate. A token that merges part of `click[` with
+  the product identifier still counts.
 - Each product option group gets its own prompt listing exact option names and
   a synthetic `none` choice. The assistant response is
-  `<answer>option name</answer>`. As on search-result pages, teacher forcing
-  sums log probabilities for tokens overlapping the answer text; the tags
-  provide context but do not enter that sum. The raw joint probabilities of
+  `<think> The best choice for the {group_name} group is {choice_name}`.
+  Teacher forcing sums log probabilities for tokens overlapping the choice
+  name. The preceding text provides context but does not enter that sum,
+  unless a token merges it with part of the choice. The raw joint probabilities of
   full-reward choice combinations are summed for native reward aggregation.
 - `algorithm.treehca.webshop_prune_unsuccessful_choices` defaults to `true`.
   It scores only option names that occur in at least one full-reward purchase
@@ -137,10 +140,10 @@ blue
 none (do not select any option in this group)
 ].
 
-Now choose one option for the "color" group. The "none" choice means never clicking an option in this group. Write the exact option name, or "none", inside <answer>...</answer>. For example: <answer>red</answer>.
+Now choose one option for the "color" group that best satisfies the user's needs. The "none" choice means never clicking an option in this group. Think about what is the best choice inside <think>...</think> before giving your answer.
 ```
 
-The `red` probe appends `<answer>red</answer>` after the assistant boundary.
+The `red` probe appends `<think> The best choice for the color group is red` after the assistant boundary.
 If only `red` can occur in a full-reward combination, the default setting
 scores just that response. With pruning disabled, the `blue` and `none` probes
 use the same prompt with their respective exact names. A second option group

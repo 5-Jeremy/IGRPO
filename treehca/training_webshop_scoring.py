@@ -14,7 +14,7 @@ import torch
 
 from treehca.product_page_parser import extract_product_page_contexts, parse_product_page_fields
 from treehca.pseudo_rollout_product_page import GROUP_NONE_ACTION, _build_product_page_prompt
-from treehca.pseudo_rollout_results_page import prepare_tagged_answer_probe
+from treehca.pseudo_rollout_results_page import prepare_response_suffix_probe
 from treehca.training_pseudo_probes import TrainingProductOptionProbe, TrainingPseudoProbeScorer
 from treehca.webshop_probability_snapshot import WebshopSnapshotSource
 from treehca.webshop_turn_success import WebshopTurnSuccessScorer
@@ -76,10 +76,9 @@ class TrainingWebshopTurnSuccessScorer(WebshopTurnSuccessScorer):
                 names = (*group.values, GROUP_NONE_ACTION)
                 options = "\n".join((*group.values, "none (do not select any option in this group)"))
                 instructions = (
-                    f'Now choose one option for the "{group.name}" group. '
+                    f'Now choose one option for the "{group.name}" group that best satisfies the user\'s needs. '
                     'The "none" choice means never clicking an option in this group. '
-                    f'Write the exact option name, or "none", inside <answer>...</answer>. '
-                    f'For example: <answer>{group.values[0]}</answer>.'
+                    f'Think about what is the best choice inside <think>...</think> before giving your answer. '
                 )
                 prompt = _build_product_page_prompt(parts, options, instructions, selection_description=f"Your available options for {group.name} are:")
                 answers = []
@@ -87,8 +86,9 @@ class TrainingWebshopTurnSuccessScorer(WebshopTurnSuccessScorer):
                 scored_pairs = [(action, name) for action, name in zip(planned.actions, names) if action in useful[planned.name]]
                 if not scored_pairs:
                     raise ValueError(f"No full-reward choice is available for option group {planned.name!r}")
+                response_prefix = f"<think> The best choice for the {group.name} group is "
                 for _, name in scored_pairs:
-                    answer = prepare_tagged_answer_probe(prompt, f"<answer>{name}</answer>", tokenizer, prompt_token_ids=prompt_ids)
+                    answer = prepare_response_suffix_probe(prompt, response_prefix, name, tokenizer, prompt_token_ids=prompt_ids)
                     prompt_ids = answer.prompt_token_ids
                     answers.append(answer)
                 probes.append(TrainingProductOptionProbe(tuple(action for action, _ in scored_pairs), tuple(name for _, name in scored_pairs), tuple(answers)))
