@@ -653,6 +653,9 @@ class TrajectoryCollector:
                 # This is the page in the prompt, before the action changes the environment.
                 batch.non_tensor_batch["page_type"] = np.asarray(previous_page_types if previous_page_types is not None else [None] * batch_size, dtype=object)
             next_obs, rewards, dones, infos = node_management.envs.step(text_actions)
+            if self.config.algorithm.adv_estimator == AdvantageEstimator.TREEHCA:
+                # is_terminal can alias dones and is later updated for pruning.
+                logging_dones = np.asarray(dones, dtype=bool).reshape(-1).copy()
             node_management.obs = next_obs
 
             if len(rewards.shape) == 2:
@@ -750,6 +753,15 @@ class TrajectoryCollector:
             batch.non_tensor_batch['deactivate'] = (~batch.non_tensor_batch['is_terminal']) & (expand_num == 0)
             # those current activate nodes, since they don't expand, so they are terminal and deactivated.
             batch.non_tensor_batch['is_terminal'] |= batch.non_tensor_batch['deactivate']
+
+            if self.config.algorithm.adv_estimator == AdvantageEstimator.TREEHCA:
+                from treehca.rollout_records import capture_branch_logging
+
+                batch.non_tensor_batch.update(capture_branch_logging(
+                    next_obs=next_obs, infos=infos, dones=logging_dones, is_last_step=is_last_step,
+                    expand_prob=expand_prob, expand_num=expand_num, branch_score=info_val,
+                    gamma=self.config.algorithm.igrpo.gamma,
+                ))
             
             node_management.deactivate(expand_num == 0)
 

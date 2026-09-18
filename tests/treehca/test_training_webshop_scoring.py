@@ -190,8 +190,10 @@ def test_native_episode_transfer_isolated_and_preserves_scoring_state(native_tra
     episode, _ = native_training
     source_episode, target_episode = episode.clone(), episode.clone()
     source, target = worker_for(source_episode), worker_for(target_episode)
+    source._rollout_task_id = 123
     state = source.export_episode()
     target.import_episode(state)
+    assert target._rollout_task_id == 123
     assert payload_for(source, source_episode)["snapshot"] == payload_for(target, target_episode)["snapshot"]
     target.env.server.user_sessions[target.env.session]["options"]["test"] = "changed"
     target.env.server.product_prices["test"] = 123
@@ -199,6 +201,25 @@ def test_native_episode_transfer_isolated_and_preserves_scoring_state(native_tra
     assert "test" not in source.env.server.product_prices
     target.reset(0)
     assert target.env.server.product_prices is target._initial_prices
+    assert target._rollout_task_id == 0
+
+
+def test_worker_logging_keeps_pre_purchase_session(monkeypatch):
+    from agent_system.environments.env_package.webshop.envs import WebshopWorker
+
+    worker = object.__new__(TreeHCAWebshopWorker)
+    worker.env = SimpleNamespace(unwrapped=SimpleNamespace(session="original-session"))
+    worker._rollout_task_id = 42
+
+    def purchase(self, action):
+        self.env.unwrapped.session = "autoreset-session"
+        return "terminal observation", 10.0, True, {"won": True}
+
+    monkeypatch.setattr(WebshopWorker, "step", purchase)
+    observation, reward, done, info = worker.step("click[buy now]")
+    assert observation == "terminal observation" and reward == 10 and done
+    assert info["webshop_session_id"] == "original-session"
+    assert info["webshop_task_id"] == 42
 
 
 def test_native_results_expand_and_share_fresh_product_cache(native_training):

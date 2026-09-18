@@ -25,7 +25,16 @@ class TreeHCAWebshopWorker(WebshopWorker):
         # A previous branch may have brought prices from another rollout group.
         self.env.unwrapped.server.product_prices = self._initial_prices
         self.__dict__.pop("_probability_source", None)
+        self._rollout_task_id = idx
         return super().reset(idx)
+
+    def step(self, action):
+        # Native purchase resets the session before returning the terminal observation.
+        session = self.env.unwrapped.session
+        obs, reward, done, info = super().step(action)
+        info["webshop_session_id"] = session
+        info["webshop_task_id"] = getattr(self, "_rollout_task_id", None)
+        return obs, reward, done, info
 
     def _source(self):
         if not hasattr(self, "_probability_source"):
@@ -63,6 +72,7 @@ class TreeHCAWebshopWorker(WebshopWorker):
         return copy.deepcopy(
             dict(
                 session=env.session,
+                rollout_task_id=getattr(self, "_rollout_task_id", None),
                 session_data=env.server.user_sessions[env.session],
                 browser={key: value for key, value in vars(env.browser).items() if key != "server"},
                 instruction_text=env.instruction_text,
@@ -76,6 +86,7 @@ class TreeHCAWebshopWorker(WebshopWorker):
         env = self.env.unwrapped
         state = copy.deepcopy(state)
         env.session = state["session"]
+        self._rollout_task_id = state.get("rollout_task_id")
         env.server.user_sessions[env.session] = state["session_data"]
         env.server.product_prices = state["product_prices"]
         self.__dict__.pop("_probability_source", None)

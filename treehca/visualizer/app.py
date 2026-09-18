@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from .data import FileCache, discover_files, graph_elements, numeric
+from .presentation import HIDDEN_COLOR_FIELDS, PROMPT_FIELDS, detail_fields, prompt_sections, visible_fields
 
 GRAPH_STYLE = [
     {
@@ -45,8 +46,23 @@ def create_app(log_dir: Path):
     files = discover_files(log_dir)
     app = Dash(__name__, assets_folder=str(Path(__file__).with_name("assets")), title="WebShop Rollout Trees")
 
-    def table(values):
-        return html.Table(html.Tbody([html.Tr([html.Th(key), html.Td(html.Pre(format_value(value)))]) for key, value in values.items()]), className="value-table details-table")
+    def table(values, pinned=None):
+        rows = []
+        for key, value in values.items():
+            attributes = (
+                {}
+                if pinned is None
+                else {
+                    "data-pin-field": key,
+                    "tabIndex": 0,
+                    "role": "button",
+                    "aria-pressed": "true" if key in pinned else "false",
+                    "title": "Double-click to unpin" if key in pinned else "Double-click to pin",
+                    "className": "pinned-field" if key in pinned else "pin-field",
+                }
+            )
+            rows.append(html.Tr([html.Th(key, **attributes), html.Td(html.Pre(format_value(value)))]))
+        return html.Table(html.Tbody(rows), className="value-table details-table")
 
     def get_tree(view):
         if not view:
@@ -61,6 +77,8 @@ def create_app(log_dir: Path):
     app.layout = html.Div(
         [
             dcc.Store(id="view"),
+            dcc.Store(id="pinned-fields", data=[]),
+            dcc.Store(id="record", data=0),
             dcc.Store(id="selection"),
             dcc.Store(id="search-state"),
             dcc.Store(id="scroll-request"),
@@ -72,6 +90,7 @@ def create_app(log_dir: Path):
                     html.Label(["Tree", dcc.Dropdown(id="tree", clearable=False)], className="selector"),
                     html.Button("Refresh files", id="refresh", className="fit-button"),
                     html.Button("Fit graph", id="fit", className="fit-button"),
+                    html.Button("Fit subtree", id="fit-subtree", className="fit-button"),
                 ],
                 className="toolbar",
             ),
@@ -94,8 +113,17 @@ def create_app(log_dir: Path):
                     ),
                     html.Aside(
                         [
-                            html.H2("Node details · all saved fields"),
-                            dcc.Dropdown(id="record", options=[], placeholder="Saved record (JSONL line)"),
+                            html.H2("Node details"),
+                            html.Div("Double-click a field name to pin or unpin it.", className="pin-hint"),
+                            html.Div(
+                                [
+                                    html.Button("Previous record", id="record-prev"),
+                                    html.Span(id="record-count"),
+                                    html.Button("Next record", id="record-next"),
+                                ],
+                                id="record-navigation",
+                                style={"display": "none"},
+                            ),
                             html.Div(id="details", className="node-details-scroll", tabIndex=0),
                         ],
                         className="details-panel",
@@ -111,12 +139,12 @@ def create_app(log_dir: Path):
                             children=[
                                 html.Div(
                                     [
-                                        html.Div([html.H3("Initial input"), html.Pre(id="context", className="node-text")], className="tab-text-panel"),
+                                        html.Div(id="context", className="prompt-sections"),
                                         html.Div(
                                             [
                                                 html.Div(
                                                     [
-                                                        dcc.Dropdown(id="text-field", options=["input", "output", "Raw record"], value="output", clearable=False, style={"minWidth": "130px"}),
+                                                        dcc.Dropdown(id="text-field", options=["output", *PROMPT_FIELDS, "post_action_observation"], value="output", clearable=False, style={"minWidth": "130px"}),
                                                         dcc.Input(id="query", type="search", placeholder="Search saved text…", debounce=0.25),
                                                         html.Button("Previous", id="previous"),
                                                         html.Button("Next", id="next"),
@@ -166,21 +194,22 @@ def create_app(log_dir: Path):
         except (ValueError, OSError, UnicodeError) as exc:
             return [], None, str(exc), []
 
-    @app.callback(Output("view", "data"), Output("warning", "children"), Output("tree-stats", "children"), Output("context", "children"), Output("metric", "options"), Input("file", "value"), Input("tree", "value"), Input("refresh", "n_clicks"))
+    @app.callback(Output("view", "data"), Output("warning", "children"), Output("tree-stats", "children"), Output("metric", "options"), Input("file", "value"), Input("tree", "value"), Input("refresh", "n_clicks"))
     def select_tree(filename, index, clicks):
-        empty = (None, "", [], "", [{"label": "Structural type", "value": ""}])
+        empty = (None, "", [], [{"label": "Structural type", "value": ""}])
         if filename is None or index is None:
             return empty
         try:
             tree = cache.load(filename).trees[index]
         except (ValueError, OSError, UnicodeError, IndexError):
             return empty
-        fields = sorted({key for node in tree.nodes.values() for record in node.records for key, value in record.items() if numeric(value) is not None})
-        context = next((n.records[0].get("input", "") for n in tree.nodes.values() if n.depth == 1 and n.records), "Initial input was not saved.")
-        return {"file": filename, "tree": index, "refresh": clicks}, " ".join(tree.warnings), table(tree.statistics), format_value(context), [{"label": "Structural type", "value": ""}] + [{"label": f, "value": f} for f in fields]
+        fields = sorted({key for node in tree.nodes.values() for record in node.records for key, value in record.items() if key not in HIDDEN_COLOR_FIELDS and numeric(value) is not None})
+        return {"file": filename, "tree": index, "refresh": clicks}, " ".join(tree.warnings), table(tree.statistics), [{"label": "Structural type", "value": ""}] + [{"label": f, "value": f} for f in fields]
 
-    @app.callback(Output("graph", "elements"), Output("graph", "layout"), Output("legend", "children"), Input("view", "data"), Input("metric", "value"), Input("fit", "n_clicks"))
-    def render_graph(view, metric, clicks):
+    @app.callback(Output("graph", "elements"), Output("graph", "layout"), Output("legend", "children"), Input("view", "data"), Input("metric", "value"))
+    def render_graph(view, metric):
+        if metric in HIDDEN_COLOR_FIELDS:
+            metric = None
         tree = get_tree(view)
         elements, limits = graph_elements(tree, metric) if tree else ([], None)
         if metric:
@@ -188,25 +217,44 @@ def create_app(log_dir: Path):
             legend += " · first record per node"
         else:
             legend = [html.Span([html.I(className=f"legend-swatch {kind}-swatch"), label]) for kind, label in [("root", "Synthetic root"), ("internal", "Internal"), ("leaf", "Leaf")]]
-        return elements, {"name": "preset", "fit": True, "padding": 36 + (clicks or 0) % 2}, legend
+        return elements, {"name": "preset", "fit": True, "padding": 36}, legend
 
-    @app.callback(Output("selection", "data"), Output("record", "options"), Output("record", "value"), Input("view", "data"), Input("graph", "tapNodeData"))
+    @app.callback(Output("selection", "data"), Input("view", "data"), Input("graph", "tapNodeData"))
     def select_node(view, tapped):
         tree = get_tree(view)
         if tree is None:
-            return None, [], None
+            return None
         uid = tapped.get("id") if ctx.triggered_id == "graph" and tapped else "root"
         node = tree.nodes.get(uid, tree.nodes["root"])
-        return {**view, "node": node.uid}, [{"label": f"Record {i + 1} · line {line}", "value": i} for i, line in enumerate(node.lines)], 0 if node.records else None
+        return {**view, "node": node.uid}
+
+    @app.callback(
+        Output("record", "data"),
+        Output("record-count", "children"),
+        Output("record-navigation", "style"),
+        Input("selection", "data"),
+        Input("record-prev", "n_clicks"),
+        Input("record-next", "n_clicks"),
+        State("record", "data"),
+    )
+    def navigate_records(selection, previous, following, current):
+        tree = get_tree(selection)
+        node = tree.nodes.get(selection["node"]) if tree and selection else None
+        count = len(node.records) if node else 0
+        index = 0
+        if count and ctx.triggered_id in ("record-prev", "record-next"):
+            index = ((current or 0) + (-1 if ctx.triggered_id == "record-prev" else 1)) % count
+        return index, f"Record {index + 1} of {count}", {"display": "flex" if count > 1 else "none"}
 
     @app.callback(
         Output("details", "children"),
+        Output("context", "children"),
         Output("node-text", "children"),
         Output("search-count", "children"),
         Output("search-state", "data"),
         Output("scroll-request", "data"),
         Input("selection", "data"),
-        Input("record", "value"),
+        Input("record", "data"),
         Input("text-field", "value"),
         Input("query", "value"),
         Input("case", "value"),
@@ -214,20 +262,25 @@ def create_app(log_dir: Path):
         Input("next", "n_clicks"),
         Input("query", "n_submit"),
         Input("end", "n_clicks"),
+        Input("pinned-fields", "data"),
         State("search-state", "data"),
     )
-    def show_record(selection, record_index, text_field, query, case, previous, following, submit, end, search):
+    def show_record(selection, record_index, text_field, query, case, previous, following, submit, end, pinned, search):
         tree = get_tree(selection)
         if tree is None or selection["node"] not in tree.nodes:
-            return [], "", "", {}, {"kind": "reset"}
+            return [], [], "", "", {}, {"kind": "reset"}
         node = tree.nodes[selection["node"]]
         record_index = min(record_index or 0, max(0, len(node.records) - 1))
         record = node.records[record_index] if node.records else {}
-        derived = {"node_uid (derived)": node.uid, "parent (derived)": node.parent, "graph depth": node.depth, "children (derived)": node.children, "JSONL lines": node.lines}
-        details = [html.H3("Structure"), table(derived), html.H3("Saved fields"), table(record)]
+        details = [table(detail_fields(node, record, pinned or []), pinned=pinned or [])]
         if not node.records:
             details.append(html.P("Synthetic root; no record was logged." if node.uid == "root" else "Missing ancestor; no record was logged."))
-        text = json.dumps(record, ensure_ascii=False, indent=2) if text_field == "Raw record" else format_value(record[text_field]) if text_field in record else ""
+        sections, error = prompt_sections(record.get("input"))
+        context = [html.Section([html.H3(name), html.Pre("No history in this prompt." if name == "history" and value is None else format_value(value), className="node-text")]) for name, value in sections.items()]
+        if error:
+            context.insert(0, html.Div(error, className="prompt-error"))
+        text_values = {**visible_fields(record), **sections}
+        text = format_value(text_values[text_field]) if text_field in text_values else ""
         matches = list(re.finditer(re.escape(query), text, 0 if case else re.IGNORECASE)) if query else []
         identity = [selection, record_index, text_field, query, case]
         index = (search or {}).get("index", 0) if (search or {}).get("identity") == identity else 0
@@ -240,7 +293,17 @@ def create_app(log_dir: Path):
             children = [text[: match.start()], html.Mark(text[match.start() : match.end()], id="current-search-match"), text[match.end() :]]
         count = f"{index + 1} of {len(matches)} matches" if matches else ("No matches" if query else "")
         request = {"kind": "end" if ctx.triggered_id == "end" else "match" if matches else "reset", "nonce": [identity, previous, following, submit, end]}
-        return details, children, count, {"identity": identity, "index": index}, request
+        return details, context, children, count, {"identity": identity, "index": index}, request
 
     app.clientside_callback("function(request) { return window.dash_clientside.treeVisualizer.scrollText(request); }", Output("scroll-result", "data"), Input("scroll-request", "data"))
+    app.clientside_callback(
+        "function(a,b,e,s) { return window.dash_clientside.rolloutViewport.fit(a,b,e,s); }",
+        Output("graph", "zoom"),
+        Output("graph", "pan"),
+        Input("fit", "n_clicks"),
+        Input("fit-subtree", "n_clicks"),
+        State("graph", "elements"),
+        State("selection", "data"),
+        prevent_initial_call=True,
+    )
     return app

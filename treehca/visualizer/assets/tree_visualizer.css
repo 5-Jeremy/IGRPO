@@ -97,3 +97,18 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible { outline: 2
 .details-panel h3 { font-size: .8rem; margin: 9px; }
 .summary-area .table-scroll { padding: 10px; }
 @media (max-width: 900px) { .toolbar { grid-template-columns: 1fr 1fr; } }
+.toolbar { grid-template-columns: minmax(180px, 1fr) 130px minmax(180px, 360px) auto auto auto; }
+.prompt-sections { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; overflow: auto; min-height: 0; }
+.prompt-sections section { display: flex; flex-direction: column; min-width: 0; min-height: 110px; }
+.prompt-sections h3 { font-size: .76rem; margin: 0 0 5px; }
+.prompt-sections pre { max-height: 160px; }
+.prompt-error { grid-column: 1 / -1; color: #8c2020; font-size: .76rem; }
+@media (max-width: 1100px) { .toolbar { grid-template-columns: 1fr 1fr 1fr; } .title-block { grid-column: 1 / -1; } }
+@media (max-width: 550px) { .toolbar, .prompt-sections { grid-template-columns: 1fr; } }
+.pin-label { margin: 8px 0 4px; font-size: .76rem; font-weight: 600; color: #415169; }
+.pin-hint { margin: 2px 0 9px; font-size: .73rem; color: #526077; }
+#details th[data-pin-field] { cursor: pointer; user-select: none; }
+#details th[data-pin-field]:hover { background: #e0f2fe; }
+#details th.pinned-field { color: #075985; background: #e0f2fe; }
+#details th.pinned-field::before { content: '★ '; }
+#record-navigation { align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: .73rem; }

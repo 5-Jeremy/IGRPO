@@ -1391,7 +1391,7 @@ class RayPPOTrainer:
                             if self.config.algorithm.adv_estimator == AdvantageEstimator.TREEHCA:
                                 from treehca.rollout_records import build_treehca_rollout_fields
 
-                                rollout_fields = build_treehca_rollout_fields(batch.non_tensor_batch)
+                                rollout_fields = build_treehca_rollout_fields(batch.non_tensor_batch, batch.batch)
                             self._dump_generations(
                                 inputs=inputs,
                                 outputs=outputs,

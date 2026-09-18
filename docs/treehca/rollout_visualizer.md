@@ -21,22 +21,44 @@ JSON line produces an error with its line number; refresh after writing finishes
 An empty directory can be opened while waiting for training to produce logs.
 
 The layout and styles are adapted from `example_tree_visualizer`: fixed depth
-rows, rounded boxes, directed edges, pan/zoom, **Fit graph**, a tall scrollable
+rows, rounded boxes, directed edges, pan/zoom, **Fit graph**, **Fit subtree**, a tall scrollable
 details pane, and full-width bottom tabs. Labels show saved `<action>` text when
-available; full IDs and all values appear in the details pane. Colors distinguish
+available. **Fit subtree** fits the selected node and all of its descendants in
+the graph pane without removing other nodes; **Fit graph** restores the whole
+tree. Colors distinguish
 the synthetic root, internal nodes, and leaves, or any numeric saved field.
 Metric colors normalize finite values within the selected tree; missing and
 nonfinite values are gray. Leaves describe graph structure, not environment
 termination, which is not present in the example logs.
 
-Click a node to inspect **all saved fields**, including unknown future fields,
-nested objects, arrays, exact input/output text, and full numeric precision.
-**Saved text & context** provides the initial input alongside the selected node's
-input, output, or raw JSON record. Literal search supports case sensitivity,
+Click a node to inspect saved fields, including unknown future fields, nested
+objects, arrays, and full numeric precision. Node/parent/child UIDs, ancestry
+paths, and JSONL line numbers are omitted from the details pane. Duplicate saved
+records remain individually accessible through Previous/Next record buttons,
+shown only for nodes with multiple records. Graph labels and
+colors use the first saved record.
+
+The details pane also hides the token arrays `advantages`, `values`, and
+`webshop_session_id`; scalar `advantage` and `value` remain visible. Double-click
+a field name to pin it at the top, in pinning order; double-click again to unpin.
+Pinned names have a star and a blue background. Keyboard users can focus a field
+name and press Enter or Space to toggle its pin. Pins survive node, tree, and file changes
+within the open page; reloading or closing the page clears them. A pinned field
+absent from a record displays “Not saved for this node.” The color menu excludes
+`sampled_expansion_count`, `branch_logit`, `webshop_session_id`, and
+`webshop_task_id`.
+
+**Saved text & context** splits the selected node's decoded input into
+`shopping_task`, `history`, `current_observation`, and `available_actions`, in
+four separate scrollable panels. It uses the prompt-body boundaries and shared
+outer-context parser described in [prompt terminology](prompt_terminology.md).
+The chat wrapper and response instructions are not shown. Absent history is
+explicitly labeled; malformed inputs produce a parsing message instead of guessed
+sections. A separate searchable pane shows output, any of the four sections,
+or the post-action observation. Literal search supports case sensitivity,
 Previous/Next, Enter, and Jump to end. Saved markup is displayed as plain text.
-Tree/file statistics are derived from the records in that file; they are not
-training-wide diagnostics. Duplicate node records are retained and selectable by
-JSONL line number; graph labels and colors use the first saved record.
+Tree/file statistics are derived from records in that file, not training-wide
+metrics. The unchanged raw records remain available in the JSONL files.
 
 ## Reconstruction and limitations
 
@@ -55,22 +77,70 @@ If the initial record is missing or its input is ambiguous, that initial branch
 is shown separately. If records include `tree_uid` (preferred) or `uid`, the
 viewer uses that saved ID instead. Save IDs consistently across all node rows.
 
-## Useful additional logging
+## Additional TreeHCA logging
 
-No logging or training behavior is changed by this viewer. Recommended additions:
+New TreeHCA rollouts save the following fields, without schema-version or run/step
+metadata. Existing logs cannot recover fields that were never saved.
 
-- **`uid`/`tree_uid` on every node:** the most important addition, enabling exact
-  tree grouping even with repeated prompts or missing initial records.
-- **`node_uid`, `parent_node_uid`, `traj_step`:** explicit structure and saved turn
-  counter, independently checkable against `node_path` and graph depth.
-- **`is_terminal`, `deactivate`, and a termination reason:** distinguish successful
-  completion, pruning, environment failure, and reaching a turn limit.
-- **Expansion count/probability and branch score:** explain why a node was selected
-  or pruned. Values and advantages would help compare branching with training.
-- **Post-action observation and WebShop task/session ID:** show the immediate
-  result of a leaf action and identify the task. A leaf's next input never exists,
-  so its final observation cannot be recovered from the current logs.
-- **Schema version and run/step metadata:** make future formats unambiguous.
+| Fields | Meaning |
+| --- | --- |
+| `uid` | Exact tree/group identity, including across repeated prompts. |
+| `node_uid`, `parent_node_uid`, `node_path` | Explicit links and node-to-root ancestry. |
+| `traj_step` | Zero-based rollout turn counter, distinct from graph depth. |
+| `is_terminal`, `deactivate`, `environment_done` | Final training terminal flag, pruning flag, and environment termination before pruning. |
+| `termination_reason` | `success`, `environment_failure`, `environment_terminal`, `turn_limit`, `pruned`, or null for continuing nodes. |
+| `expansion_probability` | Probability used by the expansion sampler, within the active prompt group. |
+| `sampled_expansion_count`, `expansion_count` | Sampled allocation and executed allocation. On the last turn, allocation is still sampled by the existing algorithm but executed count is zero. Counts include the continuing source slot. |
+| `branch_score`, `branch_logit` | `(info_gain_sum + info_gain) / 2` at the sampling decision and that score times gamma. These are snapshots, even if deferred scores are revised later. |
+| `post_action_observation` | Returned environment observation (`anchor`), before prompt wrapping; includes the terminal observation. Falls back to text for environments without an anchor. |
+| `webshop_task_id`, `webshop_session_id` | Original reset task index and session before the action, preserved through forks. Native purchase auto-reset therefore cannot substitute a new session ID. |
+| `values`, `advantages` | Training tensor values for response positions selected by `response_mask`, in token order, excluding masked positions. |
+| `value`, `advantage` | Means of those unmasked token values, for compact display and metric coloring. |
+| `is_action_valid`, `rewards` | Saved action-validity flag and final shaped/aggregated reward in the training batch (see below). |
+
+TreeHCA normally has no critic, so `values` and `value` are null rather than
+invented estimates. Empty masked responses also have null means. Nonfinite
+additional numbers are represented by strings (`"-Infinity"`, `"Infinity"`,
+`"NaN"`) for valid JSON. Terminal failure means the environment finished without
+full success, including partial-credit purchases; it does not claim a process
+exception occurred. Exceptions that abort a rollout cannot produce a completed
+node log. When an environment supplies no success flag, the reason is the less
+specific `environment_terminal`. Actual environment termination takes precedence
+over the turn limit, which takes precedence over pruning.
+
+Collection is gated to TreeHCA; the extra worker metadata is confined to the
+TreeHCA WebShop worker. Serialization reads the final training batch after
+reordering, so values and advantages align with the saved node records. The
+existing algorithms' rollout decisions, rewards, and export format are unchanged.
+
+## `rewards` versus `score`
+
+`rewards` is serialized from the final `non_tensor_batch["rewards"]`, after reward
+computation. It is not an untouched copy of the immediate environment reward:
+
+1. The WebShop worker converts a terminal full-credit purchase to **10**, and all
+   other outcomes to **0**. The original WebShop partial-credit score is a
+   separate `task_score` in environment info.
+2. Rollout gathering replaces a pruned node's reward with `info_gain_sum * 0.5`
+   while `global_steps <= stable_steps`, and `info_gain_sum` afterward. With
+   `stable_method='threshold'`, the later value becomes 1 if `info_gain_sum >= 0.5`
+   and 0 otherwise.
+3. The tree reward manager updates internal-node rewards from terminal descendants:
+   maximum in `reward_mode='max'` (the current WebShop launcher), or average in
+   `reward_mode='avg'`. Terminal nodes retain their own rewards.
+4. That reward is placed at the response's last valid token. The exported `score`
+   is the sum of `token_level_scores` for the response.
+
+The training entry point sets `normalize_by_length=False`, so **`score` equals
+the logged `rewards`**, up to float precision. If length normalization were
+enabled, the score would instead be `rewards / subtree_traj_depths`. The score is
+computed before any KL reward penalty; it is not an advantage or the native
+WebShop partial-credit score.
+
+Source: [WebShop worker](../../agent_system/environments/env_package/webshop/envs.py),
+[rollout gathering](../../agent_system/multi_turn_rollout/rollout_loop.py),
+[tree reward manager](../../agent_system/reward_manager/tree_structure.py), and
+[training export](../../verl/trainer/ppo/ray_trainer.py).
 
 CPU checks:
 
