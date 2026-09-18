@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -69,6 +70,22 @@ class WebshopInfoGainScorer:
         self.probes = TrainingPseudoProbeScorer(tokenizer, actor_rollout_wg, max_model_len=max_model_len, batch_size=batch_size)
         self.threshold = path_probability_threshold
         self.scorers = {}
+        self.cache_reuses = 0
+        self.scoring_time_seconds = 0.0
+        self.probability_ranges = {"search_results": [math.inf, -math.inf], "item_page": [math.inf, -math.inf]}
+
+    def metrics(self):
+        """Rollout-wide metrics, including all scoring calls in this policy step."""
+        metrics = {
+            "scorer/cache_reuses": self.cache_reuses,
+            "scorer/scoring_time_seconds": self.scoring_time_seconds,
+            "scorer/forward_pass_time_seconds": self.probes.forward_pass_time_seconds,
+        }
+        for page, (minimum, maximum) in self.probability_ranges.items():
+            if minimum <= maximum:
+                metrics[f"scorer/{page}_probability_min"] = minimum
+                metrics[f"scorer/{page}_probability_max"] = maximum
+        return metrics
 
     @staticmethod
     def require_active_scores(batch):
@@ -78,6 +95,7 @@ class WebshopInfoGainScorer:
             raise ValueError(f"TreeHCA WebShop scoring is not implemented for these active rows: {reasons}. Their success probabilities remain None.")
 
     def compute(self, batch, *, policy_version):
+        scoring_start = time.perf_counter()
         payloads = batch.non_tensor_batch["webshop_scoring_payload"]
         active = batch.non_tensor_batch["webshop_active"]
         terminated = batch.non_tensor_batch["webshop_terminated"]
@@ -105,12 +123,22 @@ class WebshopInfoGainScorer:
                 groups[key].append((index, snapshot))
         for key, rows in groups.items():
             scores = self.scorers[key].score([snapshot for _, snapshot in rows], policy_version=policy_version)
+            self.cache_reuses += self.scorers[key].last_cache_reuses
             for (index, _), score in zip(rows, scores):
                 probabilities[index], reasons[index] = score.probability, score.skipped_reason
+        for payload, probability in zip(payloads, probabilities):
+            if payload is None or probability is None:
+                continue
+            page = payload["snapshot"].page_type
+            if page in self.probability_ranges:
+                bounds = self.probability_ranges[page]
+                bounds[0] = min(bounds[0], probability)
+                bounds[1] = max(bounds[1], probability)
         device = batch.batch["prompts"].device
         logs = [math.nan if p is None else (-math.inf if p == 0 else math.log(p)) for p in probabilities]
         batch.batch["avg_ans_log_probs"] = torch.tensor(logs, dtype=torch.float64, device=device)
         batch.batch["webshop_scored"] = torch.tensor([p is not None for p in probabilities], dtype=torch.bool, device=device)
         batch.non_tensor_batch["webshop_success_probability"] = probabilities
         batch.non_tensor_batch["webshop_skipped_reason"] = reasons
+        self.scoring_time_seconds += time.perf_counter() - scoring_start
         return batch

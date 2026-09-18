@@ -772,7 +772,7 @@ class TrajectoryCollector:
                     total_batch_list=total_batch_list,
                     tree_structure=True
                     )
-        
+        self._webshop_scorer_metrics = webshop_scorer.metrics() if webshop_scorer is not None else None
         return total_batch_list, success
 
     def multi_turn_loop(
@@ -845,5 +845,7 @@ class TrajectoryCollector:
                 success=total_success,
                 global_steps=gen_batch.meta_info["global_steps"]
             )
+            if self._webshop_scorer_metrics is not None:
+                gen_batch_output.meta_info["webshop_scorer_metrics"] = self._webshop_scorer_metrics
         
         return gen_batch_output

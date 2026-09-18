@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 
 import torch
 
@@ -27,6 +28,7 @@ class TrainingPseudoProbeScorer:
         self.actor = actor_rollout_wg
         self.max_model_len = max_model_len
         self.batch_size = batch_size
+        self.forward_pass_time_seconds = 0.0
 
     def score(self, probes):
         requests, lookup, owners = [], {}, []
@@ -71,7 +73,11 @@ class TrainingPseudoProbeScorer:
                 meta_info={"treehca_probe_temperature": 1.0},
             )
             data, _ = pad_dataproto_to_divisor(data, self.actor.world_size)
-            output = self.actor.compute_log_prob(data)
+            forward_start = time.perf_counter()
+            try:
+                output = self.actor.compute_log_prob(data)
+            finally:
+                self.forward_pass_time_seconds += time.perf_counter() - forward_start
             if output.meta_info.get("temperature") != 1.0:
                 raise ValueError("Training worker must honor treehca_probe_temperature=1.0")
             logs = output.batch["old_log_probs"]

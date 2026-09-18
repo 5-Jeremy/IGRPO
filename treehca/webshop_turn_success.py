@@ -78,6 +78,7 @@ class WebshopTurnSuccessScorer:
         self._results_cache: dict[tuple[str, str], dict[tuple, float]] = {}
         self._plans: dict[tuple, NativeOptionSuccessPlan] = {}
         self._label_catalog = None
+        self.last_cache_reuses = 0
 
     def clear_probability_cache(self) -> None:
         self._product_cache.clear()
@@ -98,6 +99,7 @@ class WebshopTurnSuccessScorer:
 
     def score(self, snapshots: Sequence[WebshopTurnSnapshot], *, policy_version: Hashable) -> list[TurnSuccessProbability]:
         hash(policy_version)
+        self.last_cache_reuses = 0
         if policy_version != self._policy_version:
             self.clear_probability_cache()
             self._policy_version = policy_version
@@ -112,6 +114,7 @@ class WebshopTurnSuccessScorer:
             if key not in product_jobs:
                 cached = self._product_cache.get(snapshot.query_key, {}).get(snapshot.asin) if snapshot.fresh_product_entry else None
                 if cached is not None:
+                    self.last_cache_reuses += 1
                     plan = NativeOptionSuccessPlan((), 0, 0, cached)
                 else:
                     plan = self._plan(snapshot, snapshot.asin, snapshot.selected_options)
@@ -138,6 +141,7 @@ class WebshopTurnSuccessScorer:
             page_key = self._results_key(snapshot)
             cached = None if snapshot.randomized_search else self._results_cache.get(snapshot.query_key, {}).get(page_key)
             if cached is not None:
+                self.last_cache_reuses += 1
                 results.append(TurnSuccessProbability(cached))
                 continue
             # Random pages are not cached; identical input states can share work
@@ -176,6 +180,8 @@ class WebshopTurnSuccessScorer:
                 key = (job.snapshot.query_key, asin)
                 if key not in product_jobs:
                     cached = self._product_cache.get(job.snapshot.query_key, {}).get(asin)
+                    if cached is not None:
+                        self.last_cache_reuses += 1
                     plan = self._plan(job.snapshot, asin, ())
                     probability = plan.constant_probability if cached is None else cached
                     if probability is not None:

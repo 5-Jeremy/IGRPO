@@ -50,6 +50,7 @@ def test_teacher_forcing_mixed_rows_normalization_padding_and_deduplication():
     assert scores[0] == scores[2]
     assert scores[1].action_probabilities == pytest.approx({"click[red]": 23 / 50, "click[blue]": 27 / 50})
     assert len(actor.calls) == 2  # Five unique rows, chunked at three.
+    assert scorer.forward_pass_time_seconds > 0
     first = actor.calls[0].batch
     assert first["input_ids"].shape[1] == 7
     assert first["attention_mask"][1].tolist() == [0, 0, 1, 1, 1, 1, 1]
@@ -105,6 +106,10 @@ def test_terminal_outcomes_and_inactive_slots_need_no_snapshot_or_inference():
     assert torch.isnan(batch.batch["avg_ans_log_probs"][2])
     scorer.require_active_scores(batch)
     assert not actor.calls
+    assert scorer.metrics()["scorer/cache_reuses"] == 0
+    assert scorer.metrics()["scorer/forward_pass_time_seconds"] == 0
+    assert scorer.metrics()["scorer/scoring_time_seconds"] > 0
+    assert not any("probability_min" in key for key in scorer.metrics())
 
 
 @pytest.fixture(scope="module")
@@ -143,8 +148,14 @@ def test_native_payload_order_duplicates_cache_and_policy_invalidation(native_tr
     assert values[0] == values[3] == 1
     assert 0 < values[1] < 1 and values[1] == values[2]
     calls = len(actor.calls)
+    first_metrics = scorer.metrics()
+    assert first_metrics["scorer/item_page_probability_min"] == pytest.approx(values[1])
+    assert first_metrics["scorer/item_page_probability_max"] == pytest.approx(values[1])
+    assert first_metrics["scorer/forward_pass_time_seconds"] > 0
     scorer.compute(batch, policy_version=0)
     assert len(actor.calls) == calls
+    assert scorer.metrics()["scorer/cache_reuses"] > first_metrics["scorer/cache_reuses"]
+    assert scorer.metrics()["scorer/forward_pass_time_seconds"] == first_metrics["scorer/forward_pass_time_seconds"]
     scorer.compute(batch, policy_version=1)
     assert len(actor.calls) > calls
     assert torch.exp(batch.batch["avg_ans_log_probs"]).tolist() == pytest.approx(values.tolist())
@@ -202,6 +213,9 @@ def test_native_results_expand_and_share_fresh_product_cache(native_training):
     payload = payload_for(worker_for(results_episode), results_episode, "item_page")
     result = scorer.compute(info_batch([payload]), policy_version=0)
     assert result.non_tensor_batch["webshop_success_probability"][0] > 0
+    probability = result.non_tensor_batch["webshop_success_probability"][0]
+    assert scorer.metrics()["scorer/search_results_probability_min"] == pytest.approx(probability)
+    assert scorer.metrics()["scorer/search_results_probability_max"] == pytest.approx(probability)
     calls = len(actor.calls)
     direct = payload_for(worker_for(episode), episode)
     assert direct["snapshot"].catalog_key == payload["snapshot"].catalog_key

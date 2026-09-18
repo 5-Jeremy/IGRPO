@@ -1197,6 +1197,7 @@ class RayPPOTrainer:
 
                     del batch
                     batch = gen_batch_output
+                    metrics.update(batch.meta_info.pop("webshop_scorer_metrics", {}))
                     self.debug_batch_instance(batch, "after_multi_turn_loop")
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.GiGPO:
