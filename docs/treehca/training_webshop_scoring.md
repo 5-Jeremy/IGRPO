@@ -14,6 +14,70 @@ two-stage pruning logic without modifying the standalone scorer or its vLLM
 backend. `WebshopInfoGainScorer.compute(batch, policy_version=...)` provides the
 training `DataProto` interface.
 
+## Which turn supplies the scoring prompt?
+
+A node's probability is based on the state **after its action**, using the
+prompt that would be supplied to its child for the next action. It does not
+use the prompt that generated the node's own action. The child does not need
+to be generated or expanded for this scoring to happen.
+
+For example, let A be a child of the synthetic root:
+
+| Field or operation | Context |
+| --- | --- |
+| A's generation input | Initial search page |
+| A's generated action | `search[red shoes]` |
+| A's scoring prompt | Search-results page returned by that search, with the search action in history when enabled |
+| A's `avg_ans_log_probs` | Log success probability estimated from those search results |
+| A child's generation input | The same search-results prompt body |
+| A's saved `page_type` | Initial-page type (`""`), because this field describes A's generation input |
+
+The prompt is constructed and passed through the following code path:
+
+1. In [`rollout_loop.py`](../../agent_system/multi_turn_rollout/rollout_loop.py),
+   `vanilla_multi_turn_loop_with_tree_structure` executes
+   `node_management.envs.step(text_actions)` and assigns the returned
+   `next_obs` to `node_management.obs`.
+2. That call uses `WebshopEnvironmentManager.step` in
+   [`env_manager.py`](../../agent_system/environments/env_manager.py).
+   After executing the action, it stores the previous observation/action in
+   memory and calls `build_text_obs` with the resulting observation and
+   available actions. Thus `next_obs["text"]` already contains complete
+   next-turn prompt bodies, including the configured history (subject to the
+   existing long-prompt fallback).
+3. The collector passes `next_obs["text"]` to
+   `TreeHCAWebshopEnvironmentManager.scoring_payloads` in
+   [`training_webshop_env.py`](../../treehca/training_webshop_env.py).
+   Each worker forwards its prompt to `WebshopSnapshotSource.capture` in
+   [`webshop_probability_snapshot.py`](../../treehca/webshop_probability_snapshot.py).
+   The snapshot stores that text as `snapshot.prompt` and reads `page_type`
+   from the environment's current, post-action URL. `previous_page_type` is
+   separate transition metadata; it does not select an earlier prompt.
+4. `WebshopInfoGainScorer.compute` reads
+   `non_tensor_batch["webshop_scoring_payload"]` and passes its snapshots to
+   `TrainingWebshopTurnSuccessScorer.score`. For uncached search-results
+   probes, the inherited implementation in
+   [`webshop_turn_success.py`](../../treehca/webshop_turn_success.py) passes
+   `job.snapshot.prompt` to `prepare_results_page_answer_probe` in
+   [`pseudo_rollout_results_page.py`](../../treehca/pseudo_rollout_results_page.py).
+   The scoring text comes from this snapshot, not from decoding the batch's
+   tokenized `prompts` tensor.
+5. The collector copies the resulting `avg_ans_log_probs` into the current
+   node's record. If the node is expanded, the next iteration preprocesses
+   the same `node_management.obs` for its child's generation input.
+
+The saved node `page_type` describes the **pre-action** page, whereas the
+scoring snapshot describes the **post-action** page. These can differ without
+an off-by-one error. Actual environment termination bypasses page probes and
+uses the observed purchase outcome, as described below. Pruning or reaching
+the rollout step limit does not shift the scoring context back to the input
+page; deferred page scores still follow the rules below.
+
+The synthetic root is an exception to this prompt-based scoring path:
+currently its score is inferred from its children's log scores. No
+pseudo-rollout is run from the initial no-history search prompt to score the
+root. See "Deferred tree scores" below.
+
 ## Batch contract
 
 The adapter accepts the observation batch described in
