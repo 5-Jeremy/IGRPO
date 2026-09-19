@@ -15,6 +15,7 @@ num_cpus_per_env_worker=0.1 # The CPU resource allocated for each environment wo
 
 train_data_size=16
 val_data_size=128
+val_batch_size=$val_data_size
 group_size=8
 
 MODEL_PATH="Qwen/Qwen2.5-1.5B-Instruct"
@@ -34,18 +35,18 @@ python3 -m examples.data_preprocess.prepare \
     --mode 'text' \
     --local_dir "agent_system/environments/env_package/webshop/train_data/" \
     --train_data_size $train_data_size \
-    --val_data_size $((val_data_size * 2)) # evaluate 2 × val_data_size tasks during each iteration
+    --val_data_size $val_data_size
 
 python3 -u -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gigpo \
     data.train_files=agent_system/environments/env_package/webshop/train_data/text/train.parquet \
     data.val_files=agent_system/environments/env_package/webshop/train_data/text/test.parquet \
     data.train_batch_size=$train_data_size \
-    data.val_batch_size=$val_data_size \
-    data.max_prompt_length=4096 \
+    data.val_batch_size=$val_batch_size \
+    data.max_prompt_length=6144 \
     data.max_response_length=512 \
     data.filter_overlong_prompts=True \
-    data.truncation='error' \
+    data.truncation='middle' \
     data.return_raw_chat=True \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=1e-6 \
@@ -77,7 +78,8 @@ python3 -u -m verl.trainer.main_ppo \
     algorithm.gigpo.step_advantage_w=1.0 \
     algorithm.gigpo.mode="mean_norm" \
     env.env_name=Webshop \
-    env.webshop.use_small=True \
+    env.webshop.use_small=False \
+    env.webshop.human_goals=True \
     env.seed=$SEED \
     env.max_steps=15 \
     env.rollout.n=$group_size \
@@ -100,4 +102,5 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.resume_mode=disable \
     hydra.output_subdir=null \
     trainer.val_before_train=True \
+    trainer.val_only=False \
     2>&1 | tee "$RUN_DIR/logs/$run_timestamp/train.log"

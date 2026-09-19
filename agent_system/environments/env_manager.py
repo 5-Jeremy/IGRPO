@@ -686,11 +686,27 @@ def make_envs(config):
             attr_path = os.path.join(os.path.dirname(__file__), 'env_package/webshop/webshop/data/items_ins_v2.json')
         env_kwargs = {
                     'observation_mode': 'text', 
-                    'num_products': None, 
+                    'num_products': 1000 if config.env.webshop.use_small else None,
+                    'backend': config.env.webshop.get('backend') or ('legacy' if config.env.webshop.use_small else 'centralized'),
                     'human_goals': config.env.webshop.human_goals,
                     'file_path': file_path,
                     'attr_path': attr_path
                     }
+        validation = dict(config.env.webshop.get('validation', {}))
+        validation = {"seed": validation.get("seed", 233),
+                      "shuffle_seed": validation.get("shuffle_seed", 233),
+                      "count": validation.get("count", 500)}
+        if any(type(value) is not int for value in validation.values()) or validation["count"] < 1:
+            raise ValueError("WebShop validation seeds and count must be integers, with count positive")
+        if config.data.val_batch_size > validation["count"]:
+            raise ValueError("WebShop val_batch_size must not exceed validation.count (sampling is without replacement)")
+        env_kwargs["validation"] = validation
+        env_kwargs["goal_split"] = "train"
+        human_attr_path = config.env.webshop.get('catalog_service', {}).get('human_attr_path')
+        if human_attr_path:
+            env_kwargs["human_attr_path"] = human_attr_path
+        if env_kwargs["backend"] not in {"centralized", "legacy"}:
+            raise ValueError(f"Unknown WebShop backend: {env_kwargs['backend']}")
         training_manager = WebshopEnvironmentManager
         worker_options = {}
         if config.algorithm.adv_estimator == "treehca":
@@ -698,14 +714,52 @@ def make_envs(config):
 
             training_manager = TreeHCAWebshopEnvironmentManager
             worker_options["worker_class"] = TreeHCAWebshopWorker
-        _envs = build_webshop_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker, **worker_options)
-        _val_envs = build_webshop_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
+        catalog_service = None
+        owns_catalog_service = False
+        if env_kwargs['backend'] == 'centralized':
+            from agent_system.environments.env_package.webshop.catalog_service import CatalogClient, start_catalog_service
+            settings = dict(config.env.webshop.get('catalog_service', {}))
+            catalog_service = start_catalog_service(env_kwargs, settings)
+            owns_catalog_service = not settings.get("attach", False)
+            env_kwargs['catalog_service'] = catalog_service
+            env_kwargs['catalog_settings'] = settings
+            env_kwargs['request_timeout_s'] = settings.get('request_timeout_s', 120)
+            env_kwargs['startup_timeout_s'] = settings.get('startup_timeout_s', 1800)
+            # Validate a seed view and deterministic read before creating rollout actors.
+            try:
+                client = CatalogClient(catalog_service, settings.get('startup_timeout_s', 1800))
+                client.call('get_seed_view', seed=validation['seed'], split='validation')
+                ref = client.call('get_seed_view', seed=int(config.env.seed))
+                for offset in range(1, min(config.data.train_batch_size, settings.get('seed_view_cache_size', 64))):
+                    client.call('get_seed_view', seed=int(config.env.seed) + offset)
+                if settings.get('startup_smoke_test', True):
+                    goal = client.call('get_goal', seed_view=ref, goal_index=0)
+                    client.call('render_start', episode_id='startup-smoke-test', goal=goal)
+                    client.call('search', seed_view=ref, keywords=tuple(goal['query'].split()), page=1)
+            except BaseException:
+                import ray
+                if owns_catalog_service:
+                    ray.kill(catalog_service, no_restart=True)
+                raise
+        _envs = None
+        try:
+            _envs = build_webshop_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker, **worker_options)
+            _val_envs = build_webshop_envs(seed=validation["seed"], env_num=config.data.val_batch_size, group_n=1, is_train=False, env_kwargs={**env_kwargs, "goal_split": "validation"}, resources_per_worker=resources_per_worker)
+            # Trainer closes validation first, then the owner and its catalog.
+            _envs._owns_catalog_service = owns_catalog_service
+        except BaseException:
+            try:
+                if _envs is not None:
+                    _envs.close()
+            finally:
+                if owns_catalog_service:
+                    import ray
+                    ray.kill(catalog_service, no_restart=True)
+            raise
 
         projection_f = partial(webshop_projection)
         envs = training_manager(_envs, projection_f, config)
         val_envs = WebshopEnvironmentManager(_val_envs, projection_f, config)
-        import time
-        time.sleep((config.data.train_batch_size * group_n + config.data.val_batch_size) * 0.1) # wait for the envs to be ready
         return envs, val_envs
     elif "appworld" in config.env.env_name.lower():
         from agent_system.environments.env_package.appworld import build_appworld_envs, appworld_projection

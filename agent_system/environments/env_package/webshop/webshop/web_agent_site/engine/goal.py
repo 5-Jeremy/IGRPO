@@ -13,13 +13,47 @@ nlp = spacy.load("en_core_web_sm")
 
 PRICE_RANGE = [10.0 * i for i in range(1, 100)]
 
-def get_goals(all_products, product_prices, human_goals=True):
+def get_goals(all_products, product_prices, human_goals=True, rng=None):
     if human_goals:
-        return get_human_goals(all_products, product_prices)
+        return get_human_goals(all_products, product_prices, rng=rng)
     else:
-        return get_synthetic_goals(all_products, product_prices)
+        return get_synthetic_goals(all_products, product_prices, rng=rng)
     
-def get_human_goals(all_products, product_prices):
+def get_split_goals(all_products, product_prices, human_goals, rng, split,
+                    validation, shuffle_seed, shuffle_goals=True):
+    """Partition by canonical human-goal positions, independent of worker seeds.
+
+    Synthetic training excludes targets of held-out human goals. Keep every
+    product searchable: only task generation is partitioned.
+    """
+    if split not in {"train", "validation"}:
+        raise ValueError(f"Unknown goal split: {split}")
+    # Membership depends only on construction order, not sampled price limits.
+    human = get_human_goals(all_products, product_prices, rng=(
+        rng if split == "validation" or human_goals else random.Random(0)))
+    indices = list(range(len(human)))
+    random.Random(validation["shuffle_seed"]).shuffle(indices)
+    heldout = indices[:validation["count"]]
+    if len(heldout) < validation["count"]:
+        raise ValueError(f"Requested {validation['count']} validation goals, but catalog has {len(human)} human goals. Use the full catalog for the official 500-goal split, or explicitly reduce validation.count for a smoke test.")
+    if split == "validation":
+        return [human[i] for i in heldout]
+    if human_goals:
+        excluded = set(heldout)
+        goals = [goal for i, goal in enumerate(human) if i not in excluded]
+    else:
+        excluded = {human[i]["asin"] for i in heldout}
+        products = [p for p in all_products if p["asin"] not in excluded]
+        goals = get_synthetic_goals(products, product_prices, rng=rng)
+    if shuffle_goals:
+        random.Random(shuffle_seed).shuffle(goals)
+    if not goals:
+        raise ValueError("No training goals remain after validation holdout")
+    return goals
+
+
+def get_human_goals(all_products, product_prices, rng=None):
+    rng = rng or random
     goals = []
     cnt_atts = defaultdict(int)
     cnt = 0
@@ -36,7 +70,7 @@ def get_human_goals(all_products, product_prices):
                 price = product_prices[asin]
                 price_range = [p for p in PRICE_RANGE if p > price][:4]
                 if len(price_range) >= 2:
-                    _, price_upper = sorted(random.sample(price_range, 2))
+                    _, price_upper = sorted(rng.sample(price_range, 2))
                     price_text = \
                         f', and price lower than {price_upper:.2f} dollars'
                 else:
@@ -65,7 +99,8 @@ def get_human_goals(all_products, product_prices):
     return goals
 
 
-def get_synthetic_goals(all_products, product_prices):
+def get_synthetic_goals(all_products, product_prices, rng=None):
+    rng = rng or random
     goals = []
     cnt_atts = defaultdict(int)
     for product in all_products:
@@ -81,7 +116,7 @@ def get_synthetic_goals(all_products, product_prices):
             price = product_prices[asin]
             price_range = [p for p in PRICE_RANGE if p > price][:4]
             if len(price_range) >= 2:
-                _, price_upper = sorted(random.sample(price_range, 2))
+                _, price_upper = sorted(rng.sample(price_range, 2))
                 price_text = \
                     f', and price lower than {price_upper:.2f} dollars'
             else:

@@ -48,6 +48,29 @@ class WebshopTurnSnapshot:
         return self.page_type == "item_page" and self.previous_page_type == "search_results" and not self.selected_options and not self.terminated
 
 
+def snapshot_from_episode(state, metadata, prompt, task, history, completed_steps, history_limit, previous_page_type=None):
+    """Pure snapshot construction from bounded client-owned episode state."""
+    visible = ()
+    if not state.done and state.page_type in {"search_results", "item_page"}:
+        parts = extract_product_page_contexts([prompt])[0]
+        if parts.shopping_task != task or task != state.goal["instruction_text"]:
+            raise ValueError("Prompt, manager, and environment must describe the same shopping query")
+        if state.page_type == "search_results":
+            products = {asin.lower(): asin for asin in state.visible_asins}
+            visible = tuple(products[action[6:-1].lower()] for action in parts.admissible_actions if action.startswith("click[") and action[6:-1].lower() in products)
+    return WebshopTurnSnapshot(
+        catalog_key=f"{metadata.catalog_key}:{state.seed_view.price_profile_key}:{metadata.show_attrs}:{metadata.renderer_version}",
+        goal_json=json.dumps(state.goal, sort_keys=True, separators=(",", ":")),
+        shopping_task=task, prompt=prompt, page_type=state.page_type,
+        search_terms=tuple(state.keywords), results_page=state.page,
+        visible_asins=visible, asin=state.asin, selected_options=tuple(sorted(state.selected_options)),
+        previous_page_type=previous_page_type, terminated=state.done,
+        randomized_search=bool(state.keywords and state.keywords[0] == "<r>"),
+        history=tuple((record["text_obs"], record["action"]) for record in history[-history_limit:]) if history_limit else (),
+        completed_steps=completed_steps, history_limit=history_limit,
+    )
+
+
 class WebshopSnapshotSource:
     """Share one fixed native catalog/price table across lightweight snapshots.
 
