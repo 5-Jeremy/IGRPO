@@ -13,8 +13,8 @@ export MASTER_PORT=29511
 
 num_cpus_per_env_worker=0.1 # The CPU resource allocated for each environment worker. If you want to use less CPU resources, you can decrease this value.
 
-train_data_size=8
-val_data_size=64
+train_data_size=16
+val_data_size=128
 group_size=8
 
 MODEL_PATH="Qwen/Qwen2.5-1.5B-Instruct"
@@ -67,7 +67,7 @@ python3 -u -m verl.trainer.main_ppo \
     data.return_raw_chat=True \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.1 \
+    actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.0 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
@@ -97,7 +97,7 @@ python3 -u -m verl.trainer.main_ppo \
     env.max_steps=15 \
     env.rollout.n=$group_size \
     env.resources_per_worker.num_cpus=$num_cpus_per_env_worker \
-    ray_init.num_cpus=${RAY_NUM_CPUS:-32} \
+    ray_init.num_cpus=${RAY_NUM_CPUS:-48} \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name=$PROJECT_NAME \
