@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from copy import deepcopy
 import numpy as np
 import uuid
@@ -138,8 +138,29 @@ class TrajectoryNodeStateManagement:
 
         return expand_num
 
-    def get_expand_num(self, expand_prob: np.ndarray, max_traj_to_expand_per_node: int, expand_mode: str = 'full') -> np.ndarray:
+    def get_expand_num(
+        self,
+        expand_prob: np.ndarray,
+        max_traj_to_expand_per_node: int,
+        expand_mode: str = 'full',
+        branchable_mask: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Allocate continuations, optionally preventing selected nodes from forking.
+
+        A non-branchable active node receives exactly one continuation. It is
+        excluded from the sampling pool for all remaining continuations, so it
+        can never acquire siblings.
+        """
         expand_num = np.zeros(self.batch_size, dtype=np.int32)
+
+        if branchable_mask is None:
+            branchable_mask = np.ones(self.batch_size, dtype=np.bool_)
+        else:
+            branchable_mask = np.asarray(branchable_mask, dtype=np.bool_)
+            if branchable_mask.shape != (self.batch_size,):
+                raise ValueError(
+                    f"branchable_mask must have shape ({self.batch_size},), got {branchable_mask.shape}"
+                )
 
         max_traj_to_expand_per_node = self.group_size if max_traj_to_expand_per_node <= 0 else max_traj_to_expand_per_node
         active_group_uid = np.unique(self.uid_batch[self.active_nodes])
@@ -157,7 +178,28 @@ class TrajectoryNodeStateManagement:
             else:
                 raise ValueError(f"Invalid expand_mode: {expand_mode}, expected one of ['full', 'low', 'mid']")
             group_probs = expand_prob[active_index]
-            expand_num_group = self._sample_expand_num_with_cap(group_probs, expand_num_total, max_traj_to_expand_per_node)
+            group_branchable = branchable_mask[active_index]
+            expand_num_group = np.zeros(len(active_index), dtype=np.int32)
+
+            # These nodes continue along their existing path but are not
+            # candidates for duplication.
+            expand_num_group[~group_branchable] = 1
+            remaining = expand_num_total - int(np.count_nonzero(~group_branchable))
+            if remaining > 0 and np.any(group_branchable):
+                branch_probs = group_probs[group_branchable]
+                probability_sum = branch_probs.sum()
+                if probability_sum > 0:
+                    branch_probs = branch_probs / probability_sum
+                else:
+                    # Softmax can underflow every eligible probability when a
+                    # much larger, non-branchable logit was normalized with
+                    # this group. In that rare case, allocate uniformly.
+                    branch_probs = np.full(len(branch_probs), 1 / len(branch_probs))
+                expand_num_group[group_branchable] = self._sample_expand_num_with_cap(
+                    branch_probs,
+                    remaining,
+                    max_traj_to_expand_per_node,
+                )
             expand_num[active_index] = expand_num_group
         
         return expand_num

@@ -43,6 +43,8 @@ class WebshopWorker:
         info = dict(info or {})  # make a *copy* so we can mutate safely
         info['available_actions'] = self.env.get_available_actions()
         info['task_score'] = reward
+        env = self.env.unwrapped
+        info['page_type'] = env.server.get_page_name(env.browser.current_url)
 
         # Redefine reward. We only use rule-based reward - win for 10, lose for 0.
         if done and reward == 1.0:
@@ -59,6 +61,8 @@ class WebshopWorker:
         obs, info = self.env.reset(session=idx)
         info = dict(info or {})
         info['available_actions'] = self.env.get_available_actions()
+        env = self.env.unwrapped
+        info['page_type'] = env.server.get_page_name(env.browser.current_url)
         info['won'] = False
         return obs, info
     

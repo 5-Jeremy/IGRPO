@@ -746,10 +746,42 @@ class TrajectoryCollector:
             info_gain_sum = batch.non_tensor_batch["info_gain_sum"]
             info_gain = batch.non_tensor_batch["info_gain"]
             info_val = (info_gain_sum + info_gain) / 2.0
+
+            branchable_mask = None
+            if "webshop" in self.config.env.env_name.lower():
+                # ``infos`` describes next_obs, which is the observation from
+                # which the next action (and any forked siblings) would start.
+                # Item subpages have only a single useful continuation, so keep
+                # that path alive without ever duplicating it.
+                branchable_mask = np.asarray(
+                    [info.get("page_type") != "item_sub_page" for info in infos],
+                    dtype=np.bool_,
+                )
+
             expand_prob = node_management.compute_expand_prob(val=info_val, gamma=self.config.algorithm.igrpo.gamma)
+            if branchable_mask is not None:
+                # Expansion probabilities describe selection for *additional*
+                # continuations. Remove non-branchable nodes and renormalize
+                # each prompt group over its eligible nodes.
+                expand_prob[node_management.active_nodes & ~branchable_mask] = 0
+                branchable_groups = np.unique(
+                    node_management.uid_batch[node_management.active_nodes & branchable_mask]
+                )
+                for group_uid in branchable_groups:
+                    group_mask = (
+                        node_management.active_nodes
+                        & branchable_mask
+                        & (node_management.uid_batch == group_uid)
+                    )
+                    probability_sum = expand_prob[group_mask].sum()
+                    if probability_sum > 0:
+                        expand_prob[group_mask] /= probability_sum
+                    else:
+                        expand_prob[group_mask] = 1 / np.count_nonzero(group_mask)
             expand_num = node_management.get_expand_num(expand_prob=expand_prob,
                                                         max_traj_to_expand_per_node=self.config.algorithm.igrpo.max_traj_to_expand_per_node,
-                                                        expand_mode=self.config.algorithm.igrpo.expand_mode)
+                                                        expand_mode=self.config.algorithm.igrpo.expand_mode,
+                                                        branchable_mask=branchable_mask)
             # those activate nodes now deactivate here, since they don't expand.
             batch.non_tensor_batch['deactivate'] = (~batch.non_tensor_batch['is_terminal']) & (expand_num == 0)
             # those current activate nodes, since they don't expand, so they are terminal and deactivated.
