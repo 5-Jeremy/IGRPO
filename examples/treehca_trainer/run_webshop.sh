@@ -1,6 +1,7 @@
 set -x
 set -o pipefail
-ENGINE=${1:-vllm}
+ENGINE=vllm
+SEED=${1:-0}
 ulimit -u 65536
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 # export RAY_DEBUG_POST_MORTEM=1
@@ -21,7 +22,7 @@ PROJECT_NAME=${PROJECT_NAME:-ICLR}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-treehca-webshop}
 RUN_DIR=${RUN_DIR:-runs/$PROJECT_NAME/$EXPERIMENT_NAME}
 DEBUG_DIR=${DEBUG_DIR:-$RUN_DIR/debug_batches}
-mkdir -p "$RUN_DIR"
+mkdir -p "$RUN_DIR/logs/$run_timestamp"
 
 # mode="mean_norm" # "mean_norm" or "mean_std_norm"
 run_timestamp=$(date -u +'%Y%m%dT%H%M%S.%N')-$$
@@ -92,7 +93,7 @@ python3 -u -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=False \
     env.env_name=Webshop \
     env.webshop.use_small=True \
-    env.seed=0 \
+    env.seed=$SEED \
     env.max_steps=15 \
     env.rollout.n=$group_size \
     env.resources_per_worker.num_cpus=$num_cpus_per_env_worker \
@@ -113,5 +114,5 @@ python3 -u -m verl.trainer.main_ppo \
     trainer.max_critic_ckpt_to_keep=3 \
     trainer.resume_mode=disable \
     hydra.output_subdir=null \
-    trainer.val_before_train=True "$@" \
+    trainer.val_before_train=True \
     2>&1 | tee "$RUN_DIR/logs/$run_timestamp/train.log"
