@@ -1,13 +1,29 @@
 set -x
 
+# GiGPO on search with Qwen2.5-7B-Instruct, configured as a matched baseline
+# against examples/igrpo_trainer/run_search_7b.sh, examples/igpo_trainer/run_search_7b.sh
+# and examples/treehca_trainer/run_search_7b.sh: same model, data, group size,
+# ppo batch sizes, GPU count and retriever port scheme. Only the advantage
+# estimator and its own hyperparameters differ.
+#
+# run_search.sh in this directory is the upstream 7B recipe and is left alone.
+# It is not usable here: it reads $HOME/data, pulls the model from the HF hub,
+# hardcodes retriever port 8000, writes checkpoints to the cwd with no retention
+# limit, and passes no ray_init.num_cpus (which hangs under a Slurm cgroup).
+
 ENGINE=${1:-vllm}
 
 train_data_size=256
 val_data_size=1024
 group_size=5
 
+# GiGPO config
+mode="mean_std_norm" # "mean_norm" or "mean_std_norm"
+enable_similarity=True # enable similarity-based GiGPO
+similarity_thresh=0.9 # similarity threshold for GiGPO
+
 export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
-export MASTER_PORT=29513
+export MASTER_PORT=29516
 
 DATA=${DATA:-/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO}
 
@@ -18,30 +34,18 @@ VAL_DATA="$DATA/searchR1_processed_direct/val_subset.parquet"
 
 MODEL_PATH="$DATA/Base_models/Qwen2.5-7B-Instruct"
 PROJECT_NAME=${PROJECT_NAME:-ICLR}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-treehca-7B}
-SEARCH_PORT=${SEARCH_PORT:-8011}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-gigpo-7B}
+SEARCH_PORT=${SEARCH_PORT:-8014}
 # Checkpoints go to the project dir; /scratch/user is quota'd at 1 TB.
 RUN_DIR=${RUN_DIR:-$DATA/runs/$PROJECT_NAME/$EXPERIMENT_NAME}
-DEBUG_DIR=${DEBUG_DIR:-$RUN_DIR/debug_batches}
 
-# TreeHCA reuses the IGRPO branching scheme (algorithm.igrpo.*) and replaces only
-# the credit assignment (algorithm.treehca.*). reward_mode must stay avg/max so the
-# batch keeps one row per tree node instead of unrolled root-to-leaf chains.
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=treehca \
-    algorithm.igrpo.prob_diff_mode=True \
-    algorithm.igrpo.gamma=1.0 \
-    algorithm.igrpo.expand_mode='full' \
-    algorithm.igrpo.max_traj_to_expand_per_node=2 \
-    algorithm.igrpo.reduce_expand_num_per_steps_num=-1 \
-    algorithm.igrpo.reward_mode='max' \
-    algorithm.treehca.prob_floor=1e-6 \
-    algorithm.treehca.weight_temp=1.0 \
-    algorithm.treehca.max_weight_ratio=-1.0 \
-    algorithm.treehca.subtree_size_weight=True \
-    algorithm.treehca.leaf_baseline='group' \
-    algorithm.treehca.norm_adv_by_std=True \
-    reward_model.reward_manager='tree_structure' \
+    algorithm.adv_estimator=gigpo \
+    algorithm.gamma=0.95 \
+    algorithm.gigpo.step_advantage_w=1.0 \
+    algorithm.gigpo.mode=$mode \
+    algorithm.gigpo.enable_similarity=$enable_similarity \
+    algorithm.gigpo.similarity_thresh=$similarity_thresh \
     data.train_files=$TRAIN_DATA \
     data.val_files=$VAL_DATA \
     data.train_batch_size=$train_data_size \
@@ -65,7 +69,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
-    actor_rollout_ref.rollout.info_gain_compute_log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.55 \
@@ -93,8 +96,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=50 \
     trainer.test_freq=10 \
-    trainer.debug_freq=10 \
-    trainer.debug_dir=$DEBUG_DIR \
     trainer.total_epochs=1 \
     trainer.max_actor_ckpt_to_keep=2 \
     trainer.max_critic_ckpt_to_keep=2 \

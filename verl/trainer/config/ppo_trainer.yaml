@@ -255,6 +255,8 @@ algorithm:
     reduce_expand_num_per_steps_num: -1 # every x steps, we reduce the expand num per node, to encourage more exploration.
     reward_mode: max # avg / max / full, if full, we go up from leaf to root to obtain paths.
     prob_diff_mode: True
+    expand_score: info_val # branching score: info_val -> (p_gt + info_gain) / 2; log_ratio -> log p_gt(child) - log p_gt(parent)
+    expand_prob_floor: 1.0e-6 # clamp p_gt before the log when expand_score=log_ratio, so an underflowed branch cannot make the softmax nan
     stable_steps: 150 # more stable
     stable_method: "normal" # normal: add cummulative info gain; threshold: >=0.5-->1.0
   treehca: # TreeHCA reuses the igrpo block above for branching, these knobs only affect credit assignment

@@ -23,6 +23,10 @@ SEARCH_PORT=${SEARCH_PORT:-8009}
 # Checkpoints go to the project dir; /scratch/user is quota'd at 1 TB.
 RUN_DIR=${RUN_DIR:-$DATA/runs/$PROJECT_NAME/$EXPERIMENT_NAME}
 DEBUG_DIR=${DEBUG_DIR:-$RUN_DIR/debug_batches}
+# info_val: (p_gt + info_gain) / 2, the original score. log_ratio: log p_gt(child) -
+# log p_gt(parent), which the softmax can actually separate -- on the saved debug
+# batches info_val prunes at rank 0.49 (random) and log_ratio at 0.37.
+EXPAND_SCORE=${EXPAND_SCORE:-info_val}
 
 # TreeHCA reuses the IGRPO branching scheme (algorithm.igrpo.*) and replaces only
 # the credit assignment (algorithm.treehca.*). reward_mode must stay avg/max so the
@@ -35,6 +39,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.igrpo.max_traj_to_expand_per_node=2 \
     algorithm.igrpo.reduce_expand_num_per_steps_num=-1 \
     algorithm.igrpo.reward_mode='max' \
+    algorithm.igrpo.expand_score=$EXPAND_SCORE \
     algorithm.treehca.prob_floor=1e-6 \
     algorithm.treehca.weight_temp=1.0 \
     algorithm.treehca.max_weight_ratio=-1.0 \
