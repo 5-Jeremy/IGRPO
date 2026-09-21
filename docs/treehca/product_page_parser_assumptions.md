@@ -182,6 +182,12 @@ Repeated values within one group produce one choice. Every supplied action must
 correspond to a parsed option value or expected page control. An empty catalog
 title produces an empty `title` field when no title fragment is rendered.
 
+Production catalog loading removes cross-group duplicate values from every
+group except the last one in display order, matching WebShop's value-keyed DOM
+lookup where a later radio input replaces an earlier input with the same value.
+Groups left empty by this normalization are omitted. The parser retains its
+strict rejection so malformed or noncanonical synthetic pages remain visible.
+
 This remains a heuristic over an unescaped text representation. It cannot prove
 that the caller supplied the correct action list. For example, removing a
 value's action could make that value look like another group name. A group name

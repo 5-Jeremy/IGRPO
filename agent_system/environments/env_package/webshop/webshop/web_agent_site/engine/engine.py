@@ -317,12 +317,21 @@ def load_catalog_products(filepath, attrpath, num_products=None, human_goals=Tru
 
                 option_values = []
                 for option_content in option_contents:
-                    option_value = option_content['value'].strip().replace('/', ' | ').lower()
+                    # Slash replacement can introduce boundary whitespace that text observations remove.
+                    option_value = option_content['value'].strip().replace('/', ' | ').strip().lower()
                     option_image = option_content.get('image', None)
 
                     option_values.append(option_value)
                     option_to_image[option_value] = option_image
                 options[option_name] = option_values
+        # Available actions use a value-only key, so later radio inputs replace
+        # earlier cross-group duplicates in the native DOM lookup.
+        value_owner = {value: name for name, values in options.items() for value in values}
+        options = {
+            name: [value for value in values if value_owner[value] == name]
+            for name, values in options.items()
+        }
+        options = {name: values for name, values in options.items() if values}
         products[i]['options'] = options
         products[i]['option_to_image'] = option_to_image
 

@@ -1,10 +1,12 @@
 # Testing every product in the 1,000-item catalog
 
-The single test case
+The catalog-wide test case
 [`test_all_1000_product_pages`](../../tests/treehca/test_product_page_catalog.py)
 uses every row in
 [`items_shuffle_1000.json`](../../agent_system/environments/env_package/webshop/webshop/data/items_shuffle_1000.json).
 It is one pytest case with internal loops, not a parametrized family of cases.
+The same file also contains a focused synthetic-catalog regression for option
+normalization before rendering.
 
 Run it from the IGRPO root:
 
@@ -125,6 +127,13 @@ The final totals must be:
 The batch wrapper is checked against those same totals: 2,000 aligned,
 successful results. The focused parser tests separately exercise batches
 containing context-stage failures.
+
+The focused normalization regression separately checks leading and trailing
+slashes and values repeated across option groups. Cross-group duplicates retain
+only their last group occurrence, matching WebShop's value-keyed DOM lookup;
+groups made empty by that rule are omitted. It then renders the normalized
+product and verifies that observation fragments, actions, and parsed groups
+agree.
 
 This validates the parser's treatment of the three catalog anomalies. Distinct
 display entries with the same click command count as one actionable choice.

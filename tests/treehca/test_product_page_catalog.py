@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from treehca.product_page_parser import extract_product_page_contexts, parse_product_page_batch, parse_product_page_fields
+from treehca.product_page_parser import ProductOptionGroup, extract_product_page_contexts, parse_product_page_batch, parse_product_page_fields
 
 _ROOT = Path(__file__).resolve().parents[2]
 _WEBSHOP = _ROOT / "agent_system/environments/env_package/webshop/webshop"
@@ -167,3 +167,72 @@ def test_all_1000_product_pages(monkeypatch):
         assert result.context_parts == parsed_contexts[index], (asin, index)
         assert result.error_stage is None and result.error_message is None, (asin, index)
         assert asdict(result.product_fields) == expected_products[row], (asin, index)
+
+
+def test_catalog_canonicalizes_option_values_before_rendering(monkeypatch, tmp_path):
+    """Option values must match after HTML text extraction and action discovery."""
+    monkeypatch.syspath_prepend(str(_WEBSHOP))
+    from web_agent_site.engine import engine
+    from web_agent_site.envs import web_agent_text_env
+
+    from agent_system.environments.env_manager import WebshopEnvironmentManager
+
+    asin = "B000000001"
+    task = "Find the example product."
+    source_values = ("/Blue", "Antique White+acacia Wood/", "5 Pk-black/Navy/White/")
+    expected_values = ("| blue", "antique white+acacia wood |", "5 pk-black | navy | white |")
+    shared_value = "shared value"
+    source_product = {
+        "asin": asin,
+        "category": "test",
+        "query": "example",
+        "product_category": "Test",
+        "name": "Example product",
+        "full_description": "",
+        "small_description": [],
+        "pricing": "$1.00",
+        "customization_options": {
+            "Removed Group": [{"value": shared_value, "image": None}],
+            "Style": [{"value": shared_value, "image": None}, {"value": "Style Only", "image": None}],
+            "Color": [{"value": value, "image": None} for value in (*source_values, shared_value)],
+        },
+        "images": [""],
+    }
+    catalog_path = tmp_path / "catalog.json"
+    attributes_path = tmp_path / "attributes.json"
+    catalog_path.write_text(json.dumps([source_product]))
+    attributes_path.write_text(json.dumps({asin: {"attributes": [], "instruction": task, "instruction_attributes": []}}))
+
+    products, _, _ = engine.load_catalog_products(str(catalog_path), str(attributes_path), human_goals=False)
+    product = products[0]
+    assert product["options"] == {
+        "style": ["style only"],
+        "color": [*expected_values, shared_value],
+    }
+
+    with web_agent_text_env.app.test_request_context("/"):
+        html = engine.map_action_to_html(
+            "click",
+            session_id="parser-boundary-slashes",
+            product_info=product,
+            keywords=["example"],
+            page=1,
+            asin=asin,
+            options={},
+            instruction_text=task,
+            show_attrs=False,
+        )
+    text_env = object.__new__(web_agent_text_env.WebAgentTextEnv)
+    text_env.observation_mode = "text"
+    text_env.browser = SimpleNamespace(page_source=html, current_url="/item_page/parser-boundary-slashes")
+    text_env.instruction_text = task
+    manager = object.__new__(WebshopEnvironmentManager)
+    manager.tasks = [task]
+    observation = manager.format_obs([text_env.observation])[0]
+    actions = manager.format_avail_actions(text_env.get_available_actions())
+
+    fields = parse_product_page_fields(observation, actions)
+    assert fields.option_groups == (
+        ProductOptionGroup("style", ("style only",)),
+        ProductOptionGroup("color", (*expected_values, shared_value)),
+    )

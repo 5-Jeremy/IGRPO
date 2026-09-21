@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from itertools import accumulate
 from pathlib import Path
 
-RENDERER_VERSION = "webshop-native-v1"
+RENDERER_VERSION = "webshop-native-v3"
 SEED_SCHEME = "legacy-isolated-v1"
 
 

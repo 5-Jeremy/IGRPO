@@ -726,11 +726,28 @@ class TrajectoryCollector:
             info_gain_sum = info_gain_sum[:batch_size]
             batch.non_tensor_batch["info_gain_sum"] = info_gain_sum
             batch.non_tensor_batch["info_gain"] = np.zeros_like(info_gain_sum)
+            parent_info_gain_sum_batch = np.zeros_like(info_gain_sum)
+            is_root_parent_batch = np.ones(batch_size, dtype=np.bool_)
             if webshop_deferred is not None:
                 webshop_deferred.update(batch, active_masks, node_uid2info_gain_sum)
+                for i in range(batch_size):
+                    if not active_masks[i]:
+                        continue
+                    parent_node_uid = batch.non_tensor_batch["parent_node_uid"][i]
+                    if parent_node_uid != "root":
+                        assert parent_node_uid in node_uid2info_gain_sum, (
+                            "Missing key in node_uid2info_gain_sum: "
+                            f"{parent_node_uid}"
+                        )
+                        parent_info_gain_sum_batch[i] = (
+                            node_uid2info_gain_sum[parent_node_uid]
+                        )
+                        is_root_parent_batch[i] = False
+                    else:
+                        # compute_log_ratio_expand_val treats root parents as prob_floor,
+                        # so the value in parent_info_gain_sum_batch is ignored.
+                        parent_info_gain_sum_batch[i] = 0.0
             else:
-                parent_info_gain_sum_batch = np.zeros_like(info_gain_sum)
-                is_root_parent_batch = np.ones(batch_size, dtype=np.bool_)
                 for i in range(batch_size):
                     if active_masks[i]:
                         info_gain_sum = batch.non_tensor_batch["info_gain_sum"][i]
