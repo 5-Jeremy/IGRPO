@@ -29,7 +29,7 @@ from agent_system.multi_turn_rollout.utils import process_image, to_list_of_dict
 from agent_system.environments import EnvironmentManagerBase
 from typing import List, Dict
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
-from igrpo.core_igrpo import TrajectoryNodeStateManagement
+from igrpo.core_igrpo import TrajectoryNodeStateManagement, compute_log_ratio_expand_val
 from verl.utils.advantage_estimator import AdvantageEstimator
 
 class TrajectoryCollector:
@@ -729,6 +729,8 @@ class TrajectoryCollector:
             if webshop_deferred is not None:
                 webshop_deferred.update(batch, active_masks, node_uid2info_gain_sum)
             else:
+                parent_info_gain_sum_batch = np.zeros_like(info_gain_sum)
+                is_root_parent_batch = np.ones(batch_size, dtype=np.bool_)
                 for i in range(batch_size):
                     if active_masks[i]:
                         info_gain_sum = batch.non_tensor_batch["info_gain_sum"][i]
@@ -736,17 +738,32 @@ class TrajectoryCollector:
                         if parent_node_uid != "root":
                             assert parent_node_uid in node_uid2info_gain_sum, f"Missing key in node_uid2info_gain_sum: {parent_node_uid}"
                             parent_info_gain_sum = node_uid2info_gain_sum[parent_node_uid]
+                            is_root_parent_batch[i] = False
                         else:
                             # we assume that without any search, info gain is 0.
                             parent_info_gain_sum = 0.0
                         batch.non_tensor_batch["info_gain"][i] = info_gain_sum - parent_info_gain_sum
+                        parent_info_gain_sum_batch[i] = parent_info_gain_sum
 
             # dynamically change the node_management, according to the info gain
             node_management.deactivate(torch_to_numpy(dones, is_object=False))
             info_gain_sum = batch.non_tensor_batch["info_gain_sum"]
             info_gain = batch.non_tensor_batch["info_gain"]
-            info_val = (info_gain_sum + info_gain) / 2.0
-
+            expand_score = self.config.algorithm.igrpo.expand_score
+            if expand_score == 'info_val':
+                info_val = (info_gain_sum + info_gain) / 2.0
+            elif expand_score == 'log_ratio':
+                info_val = compute_log_ratio_expand_val(
+                    info_gain_sum=info_gain_sum,
+                    parent_info_gain_sum=parent_info_gain_sum_batch,
+                    is_root_parent=is_root_parent_batch,
+                    prob_diff_mode=self.config.algorithm.igrpo.prob_diff_mode,
+                    prob_floor=self.config.algorithm.igrpo.expand_prob_floor,
+                    dtype=info_gain_sum.dtype,
+                )
+            else:
+                raise ValueError(f"Invalid expand_score: {expand_score}, expected one of ['info_val', 'log_ratio']")
+            
             branchable_mask = None
             if "webshop" in self.config.env.env_name.lower():
                 # ``infos`` describes next_obs, which is the observation from

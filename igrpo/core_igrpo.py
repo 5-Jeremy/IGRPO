@@ -7,6 +7,55 @@ import numpy as np
 import uuid
 from agent_system.environments import EnvironmentManagerBase
 
+def _to_log_prob(values: np.ndarray, prob_diff_mode: bool, prob_floor: float) -> np.ndarray:
+    """Ground-truth answer log-probability of a node, clamped away from -inf.
+
+    The rollout stores ``exp(avg answer log-prob)`` in ``info_gain_sum`` when
+    ``algorithm.igrpo.prob_diff_mode`` is on, and the raw average log-prob otherwise.
+    """
+    log_floor = float(np.log(prob_floor))
+    values = np.asarray(values, dtype=np.float64)
+    if prob_diff_mode:
+        values = np.nan_to_num(values, nan=prob_floor, posinf=1.0, neginf=prob_floor)
+        return np.log(np.clip(values, prob_floor, 1.0))
+    values = np.nan_to_num(values, nan=log_floor, posinf=0.0, neginf=log_floor)
+    return np.clip(values, log_floor, 0.0)
+
+
+def compute_log_ratio_expand_val(info_gain_sum: np.ndarray,
+                                 parent_info_gain_sum: np.ndarray,
+                                 is_root_parent: np.ndarray,
+                                 prob_diff_mode: bool = True,
+                                 prob_floor: float = 1e-6,
+                                 dtype=np.float32) -> np.ndarray:
+    """Branching score ``log p_gt(child) - log p_gt(parent)``.
+
+    Fed to :meth:`TrajectoryNodeStateManagement.compute_expand_prob`, whose softmax at
+    gamma=1 then draws a frontier node in proportion to the hindsight ratio
+    p_gt(child) / p_gt(parent). The default score ``(p_gt + info_gain) / 2`` instead
+    exponentiates a quantity already in [0, 1], so sibling logits differ by hundredths
+    and the draw comes out near-uniform; taking the log first is what lets the softmax
+    separate them.
+
+    Every value is clamped into ``[prob_floor, 1]`` before the log. Without that a
+    hopeless branch whose p_gt underflows to 0, or a root whose parent is recorded as
+    0.0, gives -inf and the softmax returns nan. A root's parent is treated as
+    ``prob_floor`` ("nothing retrieved yet"), which is identical for every node of a
+    group at step 0 and therefore cancels in the softmax, reducing that step to a draw
+    in proportion to p_gt.
+    """
+    if not 0.0 < prob_floor <= 1.0:
+        raise ValueError(f"expand_prob_floor must be in (0, 1], got {prob_floor}")
+
+    log_child = _to_log_prob(info_gain_sum, prob_diff_mode, prob_floor)
+    log_parent = _to_log_prob(parent_info_gain_sum, prob_diff_mode, prob_floor)
+    log_parent = np.where(np.asarray(is_root_parent, dtype=bool), float(np.log(prob_floor)), log_parent)
+
+    val = log_child - log_parent
+    assert np.all(np.isfinite(val)), "log_ratio expand score is not finite"
+    return val.astype(dtype)
+
+
 @dataclass
 class TrajectoryNodeStateManagement:
     batch_size: int
@@ -131,6 +180,11 @@ class TrajectoryNodeStateManagement:
             current_probs[~available_mask] = 0.0
 
             prob_sum = current_probs.sum()
+            if prob_sum <= 0.0:
+                # every node still under the cap has underflowed to zero probability,
+                # so renormalising would be 0/0. Fall back to a uniform draw over them.
+                current_probs = available_mask.astype(np.float64)
+                prob_sum = current_probs.sum()
             current_probs /= prob_sum
             chosen = np.random.choice(n, p=current_probs)
 

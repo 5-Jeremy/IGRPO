@@ -310,7 +310,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
     elif adv_estimator == AdvantageEstimator.TREEHCA:
-        advantages, returns, treehca_metrics = core_treehca.compute_treehca_outcome_advantage(
+        tree_kwargs = dict(
             token_level_rewards=data.batch["token_level_rewards"],
             response_mask=data.batch["response_mask"],
             uid=data.non_tensor_batch["uid"],
@@ -321,12 +321,25 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             traj_step=data.non_tensor_batch["traj_step"],
             prob_diff_mode=kwargs.get("treehca_prob_diff_mode", True),
             prob_floor=kwargs.get("treehca_prob_floor", 1e-6),
-            weight_temp=kwargs.get("treehca_weight_temp", 1.0),
-            max_weight_ratio=kwargs.get("treehca_max_weight_ratio", -1.0),
-            subtree_size_weight=kwargs.get("treehca_subtree_size_weight", True),
-            leaf_baseline=kwargs.get("treehca_leaf_baseline", "group"),
             norm_adv_by_std=kwargs.get("treehca_norm_adv_by_std", True),
         )
+        treehca_credit = kwargs.get("treehca_credit", "snis")
+        if treehca_credit == "snis":
+            advantages, returns, treehca_metrics = core_treehca.compute_treehca_outcome_advantage(
+                weight_temp=kwargs.get("treehca_weight_temp", 1.0),
+                max_weight_ratio=kwargs.get("treehca_max_weight_ratio", -1.0),
+                subtree_size_weight=kwargs.get("treehca_subtree_size_weight", True),
+                leaf_baseline=kwargs.get("treehca_leaf_baseline", "group"),
+                **tree_kwargs,
+            )
+        elif treehca_credit == "q_hindsight":
+            advantages, returns, treehca_metrics = core_treehca.compute_treehca_q_outcome_advantage(
+                max_inv_ratio=kwargs.get("treehca_max_inv_ratio", 2.0),
+                q_weight=kwargs.get("treehca_q_weight", 0.3),
+                **tree_kwargs,
+            )
+        else:
+            raise ValueError(f"Invalid treehca.credit: {treehca_credit}, expected one of ['snis', 'q_hindsight']")
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
         data.meta_info["treehca_metrics"] = treehca_metrics
@@ -1359,6 +1372,9 @@ class RayPPOTrainer:
                             treehca_subtree_size_weight=self.config.algorithm.treehca.subtree_size_weight,
                             treehca_leaf_baseline=self.config.algorithm.treehca.leaf_baseline,
                             treehca_norm_adv_by_std=self.config.algorithm.treehca.norm_adv_by_std,
+                            treehca_credit=self.config.algorithm.treehca.credit,
+                            treehca_max_inv_ratio=self.config.algorithm.treehca.max_inv_ratio,
+                            treehca_q_weight=self.config.algorithm.treehca.q_weight,
                         )
                         metrics.update(batch.meta_info.pop("treehca_metrics", {}))
                         self.debug_batch_instance(batch, "after_adv")

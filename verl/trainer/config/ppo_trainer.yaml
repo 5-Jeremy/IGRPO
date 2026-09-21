@@ -255,13 +255,18 @@ algorithm:
     reduce_expand_num_per_steps_num: -1 # every x steps, we reduce the expand num per node, to encourage more exploration.
     reward_mode: max # avg / max / full, if full, we go up from leaf to root to obtain paths.
     prob_diff_mode: True
+    expand_score: info_val # branching score: info_val -> (p_gt + info_gain) / 2; log_ratio -> log p_gt(child) - log p_gt(parent)
+    expand_prob_floor: 1.0e-6 # clamp p_gt before the log when expand_score=log_ratio, so an underflowed branch cannot make the softmax nan
     stable_steps: 150 # more stable
     stable_method: "normal" # normal: add cummulative info gain; threshold: >=0.5-->1.0
-  treehca: # TreeHCA uses igrpo branching plus environment-specific pseudo scoring
+  treehca: # TreeHCA reuses the igrpo block above for branching, these knobs only affect credit assignment
     pseudo_scorer: auto # auto / answer_block / webshop; auto detects env.env_name
     webshop_path_probability_threshold: 1.0e-3
     webshop_probe_batch_size: 32 # unique teacher-forcing rows before worker padding
     webshop_prune_unsuccessful_choices: true # score only options in a full-reward purchase combination
+    credit: snis # snis: SNIS backup over children. q_hindsight: GRPO advantage + Q * (1 - 1/hindsight ratio)
+    max_inv_ratio: 2.0 # q_hindsight only: clip 1/h, h = p_gt(node)/p_gt(parent). At 2.0 the aux term spans [-Q, +Q]
+    q_weight: 0.3 # q_hindsight only: blend share of the aux term, A = (1 - q_weight) * A_grpo + q_weight * A_aux
     prob_floor: 1.0e-6 # clamp p_gt before inverting it
     weight_temp: 1.0 # w_c = (1 / p_gt(c)) ** weight_temp
     max_weight_ratio: -1.0 # truncate w_c at this multiple of the mean sibling weight; -1 disables

@@ -7,7 +7,7 @@ val_data_size=1024
 group_size=5
 
 export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
-export MASTER_PORT=29513
+export MASTER_PORT=${MASTER_PORT:-29513}
 
 DATA=${DATA:-/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO}
 
@@ -23,6 +23,13 @@ SEARCH_PORT=${SEARCH_PORT:-8011}
 # Checkpoints go to the project dir; /scratch/user is quota'd at 1 TB.
 RUN_DIR=${RUN_DIR:-$DATA/runs/$PROJECT_NAME/$EXPERIMENT_NAME}
 DEBUG_DIR=${DEBUG_DIR:-$RUN_DIR/debug_batches}
+# info_val: (p_gt + info_gain) / 2, the original score. log_ratio: log p_gt(child) -
+# log p_gt(parent), which the softmax can actually separate -- on the saved debug
+# batches info_val prunes at rank 0.49 (random) and log_ratio at 0.37.
+EXPAND_SCORE=${EXPAND_SCORE:-info_val}
+# snis: SNIS backup over children. q_hindsight: 70% GRPO advantage + 30% of
+# Q * (1 - 1/h), h = p_gt(node) / p_gt(parent).
+TREEHCA_CREDIT=${TREEHCA_CREDIT:-snis}
 
 # TreeHCA reuses the IGRPO branching scheme (algorithm.igrpo.*) and replaces only
 # the credit assignment (algorithm.treehca.*). reward_mode must stay avg/max so the
@@ -35,6 +42,10 @@ python3 -m verl.trainer.main_ppo \
     algorithm.igrpo.max_traj_to_expand_per_node=2 \
     algorithm.igrpo.reduce_expand_num_per_steps_num=-1 \
     algorithm.igrpo.reward_mode='max' \
+    algorithm.igrpo.expand_score=$EXPAND_SCORE \
+    algorithm.treehca.credit=$TREEHCA_CREDIT \
+    algorithm.treehca.max_inv_ratio=2.0 \
+    algorithm.treehca.q_weight=0.3 \
     algorithm.treehca.prob_floor=1e-6 \
     algorithm.treehca.weight_temp=1.0 \
     algorithm.treehca.max_weight_ratio=-1.0 \
@@ -96,8 +107,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.debug_freq=10 \
     trainer.debug_dir=$DEBUG_DIR \
     trainer.total_epochs=1 \
-    trainer.max_actor_ckpt_to_keep=3 \
-    trainer.max_critic_ckpt_to_keep=3 \
+    trainer.max_actor_ckpt_to_keep=2 \
+    trainer.max_critic_ckpt_to_keep=2 \
     trainer.resume_mode=auto \
     trainer.val_before_train=False \
     hydra.run.dir='./output/${now:%Y-%m-%d}/${now:%H-%M-%S}' \
