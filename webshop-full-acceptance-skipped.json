@@ -1,0 +1,2245 @@
+{
+  "full": true,
+  "skip_serialization": true,
+  "skip_shuffling": true,
+  "groups": 16,
+  "replicas": 8,
+  "service_after_load": {
+    "ready": true,
+    "search_ready": true,
+    "service_version": 1,
+    "pid": 2630198,
+    "catalog_key": "3c3c0281bf9d04172803c05a54b79433c021e80f0f604879dda2f53388fa5280",
+    "rss_bytes": 15203160064,
+    "catalog_load_count": 1,
+    "connected_workers": 0,
+    "seed_view_count": 0,
+    "seed_view_bytes": null,
+    "seed_goal_counts": {},
+    "metrics": {
+      "catalog_loads": 1,
+      "load_seconds": 84.98669765517116,
+      "health/queue_seconds": 86.26387929916382,
+      "health/queue_seconds/max": 86.26269245147705,
+      "health/queue_seconds/bucket_100": 1,
+      "health/retries": 0,
+      "health/calls": 2,
+      "health/bytes": 1192,
+      "health/execution_seconds": 0.0002909153699874878,
+      "health/execution_seconds/max": 0.0002909153699874878,
+      "health/execution_seconds/bucket_0.001": 1,
+      "health/queue_seconds/bucket_0.01": 1
+    },
+    "config": {
+      "file_path": "/data1/jcarleton/IGRPO/agent_system/environments/env_package/webshop/webshop/data/items_shuffle.json",
+      "attr_path": "/data1/jcarleton/IGRPO/agent_system/environments/env_package/webshop/webshop/data/items_ins_v2.json",
+      "human_attr_path": "/data1/jcarleton/IGRPO/agent_system/environments/env_package/webshop/webshop/data/items_human_ins.json",
+      "human_goals": false,
+      "num_products": null,
+      "show_attrs": false,
+      "index_path": "/data1/jcarleton/IGRPO/agent_system/environments/env_package/webshop/webshop/search_engine/indexes",
+      "shuffle_goals": false,
+      "measure_seed_view_bytes": false,
+      "seed_view_cache_size": 16,
+      "product_subset_cache_size": 4096,
+      "search_cache_size": 1024,
+      "max_pending_requests": 256,
+      "max_batch_size": 256,
+      "max_response_bytes": 16777216
+    }
+  },
+  "service_after_seed_views": {
+    "ready": true,
+    "search_ready": true,
+    "service_version": 1,
+    "pid": 2630198,
+    "catalog_key": "3c3c0281bf9d04172803c05a54b79433c021e80f0f604879dda2f53388fa5280",
+    "rss_bytes": 187383263232,
+    "catalog_load_count": 1,
+    "connected_workers": 0,
+    "seed_view_count": 16,
+    "seed_view_bytes": null,
+    "seed_goal_counts": {
+      "0": 11674685,
+      "1": 11674685,
+      "2": 11674685,
+      "3": 11674685,
+      "4": 11674685,
+      "5": 11674685,
+      "6": 11674685,
+      "7": 11674685,
+      "8": 11674685,
+      "9": 11674685,
+      "10": 11674685,
+      "11": 11674685,
+      "12": 11674685,
+      "13": 11674685,
+      "14": 11674685,
+      "15": 11674685
+    },
+    "metrics": {
+      "catalog_loads": 1,
+      "load_seconds": 84.98669765517116,
+      "health/queue_seconds": 86.2668559551239,
+      "health/queue_seconds/max": 86.26269245147705,
+      "health/queue_seconds/bucket_100": 1,
+      "health/retries": 0,
+      "health/calls": 3,
+      "health/bytes": 2557,
+      "health/execution_seconds": 0.0005711764097213745,
+      "health/execution_seconds/max": 0.0002909153699874878,
+      "health/execution_seconds/bucket_0.001": 2,
+      "health/queue_seconds/bucket_0.01": 2,
+      "get_seed_view/queue_seconds": 0.11301398277282715,
+      "get_seed_view/queue_seconds/max": 0.04228997230529785,
+      "get_seed_view/queue_seconds/bucket_0.01": 14,
+      "get_seed_view/retries": 0,
+      "get_seed_view/calls": 16,
+      "seed_cache_builds": 16,
+      "get_seed_view/bytes": 5984,
+      "get_seed_view/execution_seconds": 1039.5966553241014,
+      "get_seed_view/execution_seconds/max": 111.71556801348925,
+      "get_seed_view/execution_seconds/bucket_100": 15,
+      "get_seed_view/queue_seconds/bucket_0.1": 2,
+      "get_seed_view/execution_seconds/bucket_1000": 1
+    },
+    "config": {
+      "file_path": "/data1/jcarleton/IGRPO/agent_system/environments/env_package/webshop/webshop/data/items_shuffle.json",
+      "attr_path": "/data1/jcarleton/IGRPO/agent_system/environments/env_package/webshop/webshop/data/items_ins_v2.json",
+      "human_attr_path": "/data1/jcarleton/IGRPO/agent_system/environments/env_package/webshop/webshop/data/items_human_ins.json",
+      "human_goals": false,
+      "num_products": null,
+      "show_attrs": false,
+      "index_path": "/data1/jcarleton/IGRPO/agent_system/environments/env_package/webshop/webshop/search_engine/indexes",
+      "shuffle_goals": false,
+      "measure_seed_view_bytes": false,
+      "seed_view_cache_size": 16,
+      "product_subset_cache_size": 4096,
+      "search_cache_size": 1024,
+      "max_pending_requests": 256,
+      "max_batch_size": 256,
+      "max_response_bytes": 16777216
+    }
+  },
+  "service_final": {
+    "ready": true,
+    "search_ready": true,
+    "service_version": 1,
+    "pid": 2630198,
+    "catalog_key": "3c3c0281bf9d04172803c05a54b79433c021e80f0f604879dda2f53388fa5280",
+    "rss_bytes": 187591929856,
+    "catalog_load_count": 1,
+    "connected_workers": 128,
+    "seed_view_count": 16,
+    "seed_view_bytes": null,
+    "seed_goal_counts": {
+      "0": 11674685,
+      "7": 11674685,
+      "9": 11674685,
+      "10": 11674685,
+      "11": 11674685,
+      "15": 11674685,
+      "2": 11674685,
+      "12": 11674685,
+      "3": 11674685,
+      "4": 11674685,
+      "8": 11674685,
+      "6": 11674685,
+      "13": 11674685,
+      "14": 11674685,
+      "5": 11674685,
+      "1": 11674685
+    },
+    "metrics": {
+      "catalog_loads": 1,
+      "load_seconds": 84.98669765517116,
+      "health/queue_seconds": 86.2684919834137,
+      "health/queue_seconds/max": 86.26269245147705,
+      "health/queue_seconds/bucket_100": 1,
+      "health/retries": 0,
+      "health/calls": 4,
+      "health/bytes": 4487,
+      "health/execution_seconds": 0.001253269612789154,
+      "health/execution_seconds/max": 0.0006820932030677795,
+      "health/execution_seconds/bucket_0.001": 3,
+      "health/queue_seconds/bucket_0.01": 3,
+      "get_seed_view/queue_seconds": 17.451247930526733,
+      "get_seed_view/queue_seconds/max": 1.2000412940979004,
+      "get_seed_view/queue_seconds/bucket_0.01": 22,
+      "get_seed_view/retries": 0,
+      "get_seed_view/calls": 144,
+      "seed_cache_builds": 16,
+      "get_seed_view/bytes": 53856,
+      "get_seed_view/execution_seconds": 1039.6028763502836,
+      "get_seed_view/execution_seconds/max": 111.71556801348925,
+      "get_seed_view/execution_seconds/bucket_100": 15,
+      "get_seed_view/queue_seconds/bucket_0.1": 81,
+      "get_seed_view/execution_seconds/bucket_1000": 1,
+      "metadata/queue_seconds": 86.13161754608154,
+      "metadata/queue_seconds/max": 1.6028378009796143,
+      "metadata/queue_seconds/bucket_0.1": 18,
+      "metadata/retries": 0,
+      "metadata/calls": 128,
+      "metadata/bytes": 38912,
+      "metadata/execution_seconds": 0.005287840962409973,
+      "metadata/execution_seconds/max": 0.00013424083590507507,
+      "metadata/execution_seconds/bucket_0.001": 128,
+      "metadata/queue_seconds/bucket_1": 56,
+      "metadata/queue_seconds/bucket_10": 40,
+      "get_seed_view/queue_seconds/bucket_10": 3,
+      "seed_cache_hits": 1793,
+      "get_seed_view/execution_seconds/bucket_0.001": 128,
+      "get_seed_view/queue_seconds/bucket_1": 29,
+      "connect/queue_seconds": 6.887200593948364,
+      "connect/queue_seconds/max": 0.2875239849090576,
+      "connect/queue_seconds/bucket_1": 5,
+      "connect/retries": 0,
+      "connect/calls": 128,
+      "connect/bytes": 512,
+      "connect/execution_seconds": 0.004748553037643433,
+      "connect/execution_seconds/max": 8.201226592063904e-05,
+      "connect/execution_seconds/bucket_0.001": 128,
+      "connect/queue_seconds/bucket_0.1": 104,
+      "sample_goal_index/queue_seconds": 282.554114818573,
+      "sample_goal_index/queue_seconds/max": 4.168601036071777,
+      "sample_goal_index/queue_seconds/bucket_0.1": 91,
+      "sample_goal_index/retries": 0,
+      "sample_goal_index/calls": 256,
+      "sample_goal_index/bytes": 4350,
+      "sample_goal_index/execution_seconds": 0.03902652487158775,
+      "sample_goal_index/execution_seconds/max": 0.0003486461937427521,
+      "sample_goal_index/execution_seconds/bucket_0.001": 256,
+      "get_goal/queue_seconds": 33.914143800735474,
+      "get_goal/queue_seconds/max": 0.21591401100158691,
+      "get_goal/queue_seconds/bucket_0.1": 211,
+      "get_goal/retries": 0,
+      "get_goal/calls": 385,
+      "get_goal/bytes": 255433,
+      "get_goal/execution_seconds": 0.05288631096482277,
+      "get_goal/execution_seconds/max": 0.0002603381872177124,
+      "get_goal/execution_seconds/bucket_0.001": 385,
+      "render_start/queue_seconds": 76.05318331718445,
+      "render_start/queue_seconds/max": 0.4303774833679199,
+      "render_start/queue_seconds/bucket_0.1": 101,
+      "render_start/retries": 0,
+      "render_start/calls": 384,
+      "render_start/bytes": 677438,
+      "render_start/execution_seconds": 1.1402393095195293,
+      "render_start/execution_seconds/max": 0.040087077766656876,
+      "render_start/execution_seconds/bucket_0.1": 2,
+      "render_start/execution_seconds/bucket_0.01": 382,
+      "get_goal/queue_seconds/bucket_1": 131,
+      "sample_goal_index/queue_seconds/bucket_1": 48,
+      "render_start/queue_seconds/bucket_1": 257,
+      "connect/queue_seconds/bucket_0.01": 7,
+      "sample_goal_index/queue_seconds/bucket_0.01": 10,
+      "get_goal/queue_seconds/bucket_0.01": 32,
+      "render_start/queue_seconds/bucket_0.01": 15,
+      "render_start/queue_seconds/bucket_0.001": 11,
+      "metadata/queue_seconds/bucket_0.01": 14,
+      "get_seed_view/queue_seconds/bucket_0.001": 9,
+      "connect/queue_seconds/bucket_0.001": 12,
+      "sample_goal_index/queue_seconds/bucket_0.001": 10,
+      "get_goal/queue_seconds/bucket_0.001": 11,
+      "search_and_render/queue_seconds": 134.1800787448883,
+      "search_and_render/queue_seconds/max": 1.9822485446929932,
+      "search_and_render/queue_seconds/bucket_0.01": 1,
+      "search_and_render/retries": 0,
+      "search_and_render/calls": 128,
+      "search_and_render/bytes": 2707264,
+      "search_and_render/execution_seconds": 1.9602936282753944,
+      "search_and_render/execution_seconds/max": 0.14285030961036682,
+      "search_and_render/execution_seconds/bucket_1": 1,
+      "search_and_render/queue_seconds/bucket_1": 59,
+      "search_cache_hits": 127,
+      "search_and_render/execution_seconds/bucket_0.1": 126,
+      "search_and_render/queue_seconds/bucket_10": 68,
+      "search_and_render/execution_seconds/bucket_0.01": 1,
+      "get_scoring_products/queue_seconds": 41.07966923713684,
+      "get_scoring_products/queue_seconds/max": 0.2572355270385742,
+      "get_scoring_products/queue_seconds/bucket_0.01": 1,
+      "get_scoring_products/retries": 0,
+      "get_scoring_products/calls": 256,
+      "scoring_products": 1408,
+      "scoring_bytes": 8149632,
+      "get_scoring_products/bytes": 8149632,
+      "get_scoring_products/execution_seconds": 0.3264097794890404,
+      "get_scoring_products/execution_seconds/max": 0.006242796778678894,
+      "get_scoring_products/execution_seconds/bucket_0.01": 145,
+      "get_scoring_products/queue_seconds/bucket_0.1": 27,
+      "get_scoring_products/queue_seconds/bucket_1": 228,
+      "render_item/queue_seconds": 562.7138547897339,
+      "render_item/queue_seconds/max": 2.9250032901763916,
+      "render_item/queue_seconds/bucket_0.01": 3,
+      "render_item/retries": 0,
+      "render_item/calls": 512,
+      "render_item/bytes": 6158798,
+      "render_item/execution_seconds": 7.718458399176598,
+      "render_item/execution_seconds/max": 0.3125678636133671,
+      "render_item/execution_seconds/bucket_0.1": 380,
+      "render_item/queue_seconds/bucket_0.1": 18,
+      "render_item/queue_seconds/bucket_1": 235,
+      "render_item/queue_seconds/bucket_10": 256,
+      "get_scoring_products/execution_seconds/bucket_0.001": 111,
+      "render_item/execution_seconds/bucket_1": 4,
+      "render_item/execution_seconds/bucket_0.01": 128,
+      "purchase_and_render/queue_seconds": 270.3175013065338,
+      "purchase_and_render/queue_seconds/max": 4.231741666793823,
+      "purchase_and_render/queue_seconds/bucket_0.01": 1,
+      "purchase_and_render/retries": 0,
+      "purchase_and_render/calls": 128,
+      "purchase_and_render/bytes": 1338264,
+      "purchase_and_render/execution_seconds": 4.208145745098591,
+      "purchase_and_render/execution_seconds/max": 0.09198518097400665,
+      "purchase_and_render/execution_seconds/bucket_0.1": 128,
+      "purchase_and_render/queue_seconds/bucket_0.1": 1,
+      "purchase_and_render/queue_seconds/bucket_1": 30,
+      "purchase_and_render/queue_seconds/bucket_10": 96,
+      "sample_goal_index/queue_seconds/bucket_10": 97
+    },
+    "config": {
+      "file_path": "/data1/jcarleton/IGRPO/agent_system/environments/env_package/webshop/webshop/data/items_shuffle.json",
+      "attr_path": "/data1/jcarleton/IGRPO/agent_system/environments/env_package/webshop/webshop/data/items_ins_v2.json",
+      "human_attr_path": "/data1/jcarleton/IGRPO/agent_system/environments/env_package/webshop/webshop/data/items_human_ins.json",
+      "human_goals": false,
+      "num_products": null,
+      "show_attrs": false,
+      "index_path": "/data1/jcarleton/IGRPO/agent_system/environments/env_package/webshop/webshop/search_engine/indexes",
+      "shuffle_goals": false,
+      "measure_seed_view_bytes": false,
+      "seed_view_cache_size": 16,
+      "product_subset_cache_size": 4096,
+      "search_cache_size": 1024,
+      "max_pending_requests": 256,
+      "max_batch_size": 256,
+      "max_response_bytes": 16777216
+    }
+  },
+  "workers_after_reset": [
+    {
+      "pid": 2630206,
+      "rss_bytes": 557776896,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3382
+    },
+    {
+      "pid": 2630210,
+      "rss_bytes": 606175232,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3382
+    },
+    {
+      "pid": 2630205,
+      "rss_bytes": 559935488,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3382
+    },
+    {
+      "pid": 2630201,
+      "rss_bytes": 553066496,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3382
+    },
+    {
+      "pid": 2630204,
+      "rss_bytes": 601227264,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3382
+    },
+    {
+      "pid": 2630209,
+      "rss_bytes": 604815360,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3382
+    },
+    {
+      "pid": 2630197,
+      "rss_bytes": 552280064,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3382
+    },
+    {
+      "pid": 2630213,
+      "rss_bytes": 556101632,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3382
+    },
+    {
+      "pid": 2630211,
+      "rss_bytes": 558747648,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3264
+    },
+    {
+      "pid": 2630212,
+      "rss_bytes": 557338624,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3264
+    },
+    {
+      "pid": 2630203,
+      "rss_bytes": 562208768,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3264
+    },
+    {
+      "pid": 2630207,
+      "rss_bytes": 615133184,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3264
+    },
+    {
+      "pid": 2630200,
+      "rss_bytes": 555626496,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3264
+    },
+    {
+      "pid": 2636320,
+      "rss_bytes": 550989824,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3264
+    },
+    {
+      "pid": 2636313,
+      "rss_bytes": 554385408,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3264
+    },
+    {
+      "pid": 2636323,
+      "rss_bytes": 563064832,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3264
+    },
+    {
+      "pid": 2636303,
+      "rss_bytes": 549134336,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3583
+    },
+    {
+      "pid": 2636335,
+      "rss_bytes": 559591424,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3583
+    },
+    {
+      "pid": 2636334,
+      "rss_bytes": 566890496,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3583
+    },
+    {
+      "pid": 2636329,
+      "rss_bytes": 565424128,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3583
+    },
+    {
+      "pid": 2636304,
+      "rss_bytes": 556511232,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3583
+    },
+    {
+      "pid": 2636749,
+      "rss_bytes": 559423488,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3583
+    },
+    {
+      "pid": 2636315,
+      "rss_bytes": 556756992,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3583
+    },
+    {
+      "pid": 2636301,
+      "rss_bytes": 572628992,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3583
+    },
+    {
+      "pid": 2636306,
+      "rss_bytes": 562286592,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3393
+    },
+    {
+      "pid": 2636333,
+      "rss_bytes": 553164800,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3393
+    },
+    {
+      "pid": 2636814,
+      "rss_bytes": 559128576,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3393
+    },
+    {
+      "pid": 2636781,
+      "rss_bytes": 564903936,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3393
+    },
+    {
+      "pid": 2636302,
+      "rss_bytes": 572284928,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3393
+    },
+    {
+      "pid": 2636318,
+      "rss_bytes": 563793920,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3393
+    },
+    {
+      "pid": 2636847,
+      "rss_bytes": 554336256,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3393
+    },
+    {
+      "pid": 2636879,
+      "rss_bytes": 563765248,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3393
+    },
+    {
+      "pid": 2636912,
+      "rss_bytes": 570974208,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3378
+    },
+    {
+      "pid": 2636978,
+      "rss_bytes": 559935488,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3378
+    },
+    {
+      "pid": 2636982,
+      "rss_bytes": 564506624,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3378
+    },
+    {
+      "pid": 2637113,
+      "rss_bytes": 572604416,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3378
+    },
+    {
+      "pid": 2637043,
+      "rss_bytes": 553234432,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3378
+    },
+    {
+      "pid": 2637108,
+      "rss_bytes": 559783936,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3378
+    },
+    {
+      "pid": 2637236,
+      "rss_bytes": 562774016,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3378
+    },
+    {
+      "pid": 2637209,
+      "rss_bytes": 573087744,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3378
+    },
+    {
+      "pid": 2637295,
+      "rss_bytes": 563486720,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3386
+    },
+    {
+      "pid": 2637391,
+      "rss_bytes": 565006336,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3386
+    },
+    {
+      "pid": 2637393,
+      "rss_bytes": 556412928,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3386
+    },
+    {
+      "pid": 2637332,
+      "rss_bytes": 565768192,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3386
+    },
+    {
+      "pid": 2637450,
+      "rss_bytes": 558780416,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3386
+    },
+    {
+      "pid": 2637564,
+      "rss_bytes": 567713792,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3386
+    },
+    {
+      "pid": 2637507,
+      "rss_bytes": 559570944,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3386
+    },
+    {
+      "pid": 2637685,
+      "rss_bytes": 569749504,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3386
+    },
+    {
+      "pid": 2637818,
+      "rss_bytes": 566755328,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3459
+    },
+    {
+      "pid": 2637877,
+      "rss_bytes": 565420032,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3459
+    },
+    {
+      "pid": 2637760,
+      "rss_bytes": 568160256,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3459
+    },
+    {
+      "pid": 2637650,
+      "rss_bytes": 557346816,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3459
+    },
+    {
+      "pid": 2637910,
+      "rss_bytes": 562950144,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3459
+    },
+    {
+      "pid": 2638018,
+      "rss_bytes": 566005760,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3459
+    },
+    {
+      "pid": 2638051,
+      "rss_bytes": 571432960,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3459
+    },
+    {
+      "pid": 2638105,
+      "rss_bytes": 573358080,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3459
+    },
+    {
+      "pid": 2638135,
+      "rss_bytes": 569372672,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3407
+    },
+    {
+      "pid": 2638217,
+      "rss_bytes": 561008640,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3407
+    },
+    {
+      "pid": 2638274,
+      "rss_bytes": 572870656,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3407
+    },
+    {
+      "pid": 2638333,
+      "rss_bytes": 571023360,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3407
+    },
+    {
+      "pid": 2638363,
+      "rss_bytes": 569622528,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3407
+    },
+    {
+      "pid": 2638555,
+      "rss_bytes": 569151488,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3407
+    },
+    {
+      "pid": 2638649,
+      "rss_bytes": 567881728,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3407
+    },
+    {
+      "pid": 2638570,
+      "rss_bytes": 562176000,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3407
+    },
+    {
+      "pid": 2638675,
+      "rss_bytes": 562429952,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3438
+    },
+    {
+      "pid": 2638761,
+      "rss_bytes": 566099968,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3438
+    },
+    {
+      "pid": 2638705,
+      "rss_bytes": 565264384,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3438
+    },
+    {
+      "pid": 2638819,
+      "rss_bytes": 561426432,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3438
+    },
+    {
+      "pid": 2638818,
+      "rss_bytes": 572100608,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3438
+    },
+    {
+      "pid": 2638876,
+      "rss_bytes": 582959104,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3438
+    },
+    {
+      "pid": 2638990,
+      "rss_bytes": 563703808,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3438
+    },
+    {
+      "pid": 2638962,
+      "rss_bytes": 573657088,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3438
+    },
+    {
+      "pid": 2639048,
+      "rss_bytes": 570572800,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3312
+    },
+    {
+      "pid": 2639162,
+      "rss_bytes": 578002944,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3312
+    },
+    {
+      "pid": 2639108,
+      "rss_bytes": 583258112,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3312
+    },
+    {
+      "pid": 2639275,
+      "rss_bytes": 579854336,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3312
+    },
+    {
+      "pid": 2639543,
+      "rss_bytes": 583331840,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3312
+    },
+    {
+      "pid": 2639370,
+      "rss_bytes": 575922176,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3312
+    },
+    {
+      "pid": 2639532,
+      "rss_bytes": 579932160,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3312
+    },
+    {
+      "pid": 2639340,
+      "rss_bytes": 585011200,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3312
+    },
+    {
+      "pid": 2639700,
+      "rss_bytes": 586162176,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3626
+    },
+    {
+      "pid": 2639461,
+      "rss_bytes": 576589824,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3626
+    },
+    {
+      "pid": 2639657,
+      "rss_bytes": 577347584,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3626
+    },
+    {
+      "pid": 2639773,
+      "rss_bytes": 575340544,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3626
+    },
+    {
+      "pid": 2639866,
+      "rss_bytes": 583860224,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3626
+    },
+    {
+      "pid": 2640062,
+      "rss_bytes": 587988992,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3626
+    },
+    {
+      "pid": 2639945,
+      "rss_bytes": 585293824,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3626
+    },
+    {
+      "pid": 2639888,
+      "rss_bytes": 582303744,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3626
+    },
+    {
+      "pid": 2640005,
+      "rss_bytes": 586432512,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3713
+    },
+    {
+      "pid": 2640144,
+      "rss_bytes": 590065664,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3713
+    },
+    {
+      "pid": 2640328,
+      "rss_bytes": 581648384,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3713
+    },
+    {
+      "pid": 2640384,
+      "rss_bytes": 579354624,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3713
+    },
+    {
+      "pid": 2640407,
+      "rss_bytes": 582918144,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3713
+    },
+    {
+      "pid": 2640545,
+      "rss_bytes": 581840896,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3713
+    },
+    {
+      "pid": 2640292,
+      "rss_bytes": 579514368,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3713
+    },
+    {
+      "pid": 2640491,
+      "rss_bytes": 581554176,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3713
+    },
+    {
+      "pid": 2640436,
+      "rss_bytes": 577007616,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3615
+    },
+    {
+      "pid": 2640575,
+      "rss_bytes": 582766592,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3615
+    },
+    {
+      "pid": 2640722,
+      "rss_bytes": 584544256,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3615
+    },
+    {
+      "pid": 2640725,
+      "rss_bytes": 576389120,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3615
+    },
+    {
+      "pid": 2640814,
+      "rss_bytes": 576315392,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3615
+    },
+    {
+      "pid": 2640758,
+      "rss_bytes": 584048640,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3615
+    },
+    {
+      "pid": 2640873,
+      "rss_bytes": 578670592,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3615
+    },
+    {
+      "pid": 2640933,
+      "rss_bytes": 588697600,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3615
+    },
+    {
+      "pid": 2641099,
+      "rss_bytes": 583213056,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3287
+    },
+    {
+      "pid": 2641220,
+      "rss_bytes": 579473408,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3287
+    },
+    {
+      "pid": 2641251,
+      "rss_bytes": 586821632,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3287
+    },
+    {
+      "pid": 2641254,
+      "rss_bytes": 579203072,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3287
+    },
+    {
+      "pid": 2641395,
+      "rss_bytes": 572846080,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3287
+    },
+    {
+      "pid": 2641336,
+      "rss_bytes": 573235200,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3287
+    },
+    {
+      "pid": 2641335,
+      "rss_bytes": 578867200,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3287
+    },
+    {
+      "pid": 2641570,
+      "rss_bytes": 567549952,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3287
+    },
+    {
+      "pid": 2641333,
+      "rss_bytes": 571789312,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3620
+    },
+    {
+      "pid": 2641541,
+      "rss_bytes": 574574592,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3620
+    },
+    {
+      "pid": 2641628,
+      "rss_bytes": 584036352,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3620
+    },
+    {
+      "pid": 2641484,
+      "rss_bytes": 582533120,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3620
+    },
+    {
+      "pid": 2641692,
+      "rss_bytes": 579608576,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3620
+    },
+    {
+      "pid": 2641746,
+      "rss_bytes": 582909952,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3620
+    },
+    {
+      "pid": 2641925,
+      "rss_bytes": 582455296,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3620
+    },
+    {
+      "pid": 2641893,
+      "rss_bytes": 584527872,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3620
+    },
+    {
+      "pid": 2642031,
+      "rss_bytes": 580206592,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3306
+    },
+    {
+      "pid": 2642026,
+      "rss_bytes": 580186112,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3306
+    },
+    {
+      "pid": 2642144,
+      "rss_bytes": 586940416,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3306
+    },
+    {
+      "pid": 2642293,
+      "rss_bytes": 586584064,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3306
+    },
+    {
+      "pid": 2642146,
+      "rss_bytes": 582352896,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3306
+    },
+    {
+      "pid": 2636330,
+      "rss_bytes": 601407488,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3306
+    },
+    {
+      "pid": 2636311,
+      "rss_bytes": 602710016,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3306
+    },
+    {
+      "pid": 2636328,
+      "rss_bytes": 611102720,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3306
+    }
+  ],
+  "workers_final": [
+    {
+      "pid": 2630206,
+      "rss_bytes": 559874048,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3416
+    },
+    {
+      "pid": 2630210,
+      "rss_bytes": 606175232,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3439
+    },
+    {
+      "pid": 2630205,
+      "rss_bytes": 563081216,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3278
+    },
+    {
+      "pid": 2630201,
+      "rss_bytes": 554115072,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3281
+    },
+    {
+      "pid": 2630204,
+      "rss_bytes": 601227264,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3580
+    },
+    {
+      "pid": 2630209,
+      "rss_bytes": 604815360,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3201
+    },
+    {
+      "pid": 2630197,
+      "rss_bytes": 553328640,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3133
+    },
+    {
+      "pid": 2630213,
+      "rss_bytes": 556101632,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3226
+    },
+    {
+      "pid": 2630211,
+      "rss_bytes": 559796224,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3553
+    },
+    {
+      "pid": 2630212,
+      "rss_bytes": 557338624,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3624
+    },
+    {
+      "pid": 2630203,
+      "rss_bytes": 563257344,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3356
+    },
+    {
+      "pid": 2630207,
+      "rss_bytes": 616181760,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3140
+    },
+    {
+      "pid": 2630200,
+      "rss_bytes": 555626496,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3133
+    },
+    {
+      "pid": 2636320,
+      "rss_bytes": 552038400,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3376
+    },
+    {
+      "pid": 2636313,
+      "rss_bytes": 555433984,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3221
+    },
+    {
+      "pid": 2636323,
+      "rss_bytes": 564113408,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3305
+    },
+    {
+      "pid": 2636303,
+      "rss_bytes": 550182912,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3471
+    },
+    {
+      "pid": 2636335,
+      "rss_bytes": 560640000,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3174
+    },
+    {
+      "pid": 2636334,
+      "rss_bytes": 566890496,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3428
+    },
+    {
+      "pid": 2636329,
+      "rss_bytes": 567521280,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3390
+    },
+    {
+      "pid": 2636304,
+      "rss_bytes": 556511232,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3232
+    },
+    {
+      "pid": 2636749,
+      "rss_bytes": 560472064,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3399
+    },
+    {
+      "pid": 2636315,
+      "rss_bytes": 556756992,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3385
+    },
+    {
+      "pid": 2636301,
+      "rss_bytes": 574726144,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3630
+    },
+    {
+      "pid": 2636306,
+      "rss_bytes": 563335168,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3359
+    },
+    {
+      "pid": 2636333,
+      "rss_bytes": 556310528,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3281
+    },
+    {
+      "pid": 2636814,
+      "rss_bytes": 560177152,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3237
+    },
+    {
+      "pid": 2636781,
+      "rss_bytes": 565952512,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3291
+    },
+    {
+      "pid": 2636302,
+      "rss_bytes": 572284928,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3073
+    },
+    {
+      "pid": 2636318,
+      "rss_bytes": 563793920,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3366
+    },
+    {
+      "pid": 2636847,
+      "rss_bytes": 554336256,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3457
+    },
+    {
+      "pid": 2636879,
+      "rss_bytes": 564813824,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3365
+    },
+    {
+      "pid": 2636912,
+      "rss_bytes": 570974208,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3153
+    },
+    {
+      "pid": 2636978,
+      "rss_bytes": 560984064,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3405
+    },
+    {
+      "pid": 2636982,
+      "rss_bytes": 564506624,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3256
+    },
+    {
+      "pid": 2637113,
+      "rss_bytes": 575750144,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3159
+    },
+    {
+      "pid": 2637043,
+      "rss_bytes": 554283008,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3232
+    },
+    {
+      "pid": 2637108,
+      "rss_bytes": 559783936,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3416
+    },
+    {
+      "pid": 2637236,
+      "rss_bytes": 563822592,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3460
+    },
+    {
+      "pid": 2637209,
+      "rss_bytes": 573087744,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3483
+    },
+    {
+      "pid": 2637295,
+      "rss_bytes": 564535296,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3297
+    },
+    {
+      "pid": 2637391,
+      "rss_bytes": 565006336,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3132
+    },
+    {
+      "pid": 2637393,
+      "rss_bytes": 556412928,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3211
+    },
+    {
+      "pid": 2637332,
+      "rss_bytes": 566816768,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3185
+    },
+    {
+      "pid": 2637450,
+      "rss_bytes": 558780416,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3346
+    },
+    {
+      "pid": 2637564,
+      "rss_bytes": 567713792,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3616
+    },
+    {
+      "pid": 2637507,
+      "rss_bytes": 559570944,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3634
+    },
+    {
+      "pid": 2637685,
+      "rss_bytes": 570798080,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3307
+    },
+    {
+      "pid": 2637818,
+      "rss_bytes": 566755328,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3499
+    },
+    {
+      "pid": 2637877,
+      "rss_bytes": 566468608,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3212
+    },
+    {
+      "pid": 2637760,
+      "rss_bytes": 568160256,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3398
+    },
+    {
+      "pid": 2637650,
+      "rss_bytes": 558395392,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3234
+    },
+    {
+      "pid": 2637910,
+      "rss_bytes": 562950144,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3372
+    },
+    {
+      "pid": 2638018,
+      "rss_bytes": 566005760,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3342
+    },
+    {
+      "pid": 2638051,
+      "rss_bytes": 572481536,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3244
+    },
+    {
+      "pid": 2638105,
+      "rss_bytes": 573358080,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3346
+    },
+    {
+      "pid": 2638135,
+      "rss_bytes": 570421248,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3329
+    },
+    {
+      "pid": 2638217,
+      "rss_bytes": 561008640,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3309
+    },
+    {
+      "pid": 2638274,
+      "rss_bytes": 574967808,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3554
+    },
+    {
+      "pid": 2638333,
+      "rss_bytes": 571023360,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3778
+    },
+    {
+      "pid": 2638363,
+      "rss_bytes": 570671104,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3390
+    },
+    {
+      "pid": 2638555,
+      "rss_bytes": 569151488,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3221
+    },
+    {
+      "pid": 2638649,
+      "rss_bytes": 567881728,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3230
+    },
+    {
+      "pid": 2638570,
+      "rss_bytes": 562176000,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3392
+    },
+    {
+      "pid": 2638675,
+      "rss_bytes": 562429952,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3371
+    },
+    {
+      "pid": 2638761,
+      "rss_bytes": 567148544,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3603
+    },
+    {
+      "pid": 2638705,
+      "rss_bytes": 566312960,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3596
+    },
+    {
+      "pid": 2638819,
+      "rss_bytes": 562475008,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3180
+    },
+    {
+      "pid": 2638818,
+      "rss_bytes": 572100608,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3439
+    },
+    {
+      "pid": 2638876,
+      "rss_bytes": 582959104,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3388
+    },
+    {
+      "pid": 2638990,
+      "rss_bytes": 563703808,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3627
+    },
+    {
+      "pid": 2638962,
+      "rss_bytes": 573657088,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3597
+    },
+    {
+      "pid": 2639048,
+      "rss_bytes": 571621376,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3716
+    },
+    {
+      "pid": 2639162,
+      "rss_bytes": 579051520,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3503
+    },
+    {
+      "pid": 2639108,
+      "rss_bytes": 583258112,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3233
+    },
+    {
+      "pid": 2639275,
+      "rss_bytes": 580902912,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3238
+    },
+    {
+      "pid": 2639543,
+      "rss_bytes": 583331840,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3346
+    },
+    {
+      "pid": 2639370,
+      "rss_bytes": 575922176,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3285
+    },
+    {
+      "pid": 2639532,
+      "rss_bytes": 582029312,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3372
+    },
+    {
+      "pid": 2639340,
+      "rss_bytes": 586059776,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3196
+    },
+    {
+      "pid": 2639700,
+      "rss_bytes": 587210752,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3466
+    },
+    {
+      "pid": 2639461,
+      "rss_bytes": 576589824,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3298
+    },
+    {
+      "pid": 2639657,
+      "rss_bytes": 578396160,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3443
+    },
+    {
+      "pid": 2639773,
+      "rss_bytes": 576389120,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3433
+    },
+    {
+      "pid": 2639866,
+      "rss_bytes": 585957376,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3514
+    },
+    {
+      "pid": 2640062,
+      "rss_bytes": 587988992,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3479
+    },
+    {
+      "pid": 2639945,
+      "rss_bytes": 586342400,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3492
+    },
+    {
+      "pid": 2639888,
+      "rss_bytes": 583352320,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3319
+    },
+    {
+      "pid": 2640005,
+      "rss_bytes": 586432512,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3394
+    },
+    {
+      "pid": 2640144,
+      "rss_bytes": 590065664,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3357
+    },
+    {
+      "pid": 2640328,
+      "rss_bytes": 582696960,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3310
+    },
+    {
+      "pid": 2640384,
+      "rss_bytes": 580403200,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3314
+    },
+    {
+      "pid": 2640407,
+      "rss_bytes": 582918144,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3230
+    },
+    {
+      "pid": 2640545,
+      "rss_bytes": 581840896,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3355
+    },
+    {
+      "pid": 2640292,
+      "rss_bytes": 579514368,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3514
+    },
+    {
+      "pid": 2640491,
+      "rss_bytes": 582602752,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3255
+    },
+    {
+      "pid": 2640436,
+      "rss_bytes": 578056192,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3481
+    },
+    {
+      "pid": 2640575,
+      "rss_bytes": 583815168,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3521
+    },
+    {
+      "pid": 2640722,
+      "rss_bytes": 585592832,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3323
+    },
+    {
+      "pid": 2640725,
+      "rss_bytes": 577437696,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3355
+    },
+    {
+      "pid": 2640814,
+      "rss_bytes": 577363968,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3424
+    },
+    {
+      "pid": 2640758,
+      "rss_bytes": 584048640,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3408
+    },
+    {
+      "pid": 2640873,
+      "rss_bytes": 579719168,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3486
+    },
+    {
+      "pid": 2640933,
+      "rss_bytes": 589746176,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3533
+    },
+    {
+      "pid": 2641099,
+      "rss_bytes": 583213056,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3653
+    },
+    {
+      "pid": 2641220,
+      "rss_bytes": 579473408,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3185
+    },
+    {
+      "pid": 2641251,
+      "rss_bytes": 587870208,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3491
+    },
+    {
+      "pid": 2641254,
+      "rss_bytes": 580251648,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3348
+    },
+    {
+      "pid": 2641395,
+      "rss_bytes": 573894656,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3412
+    },
+    {
+      "pid": 2641336,
+      "rss_bytes": 575332352,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3630
+    },
+    {
+      "pid": 2641335,
+      "rss_bytes": 579915776,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3389
+    },
+    {
+      "pid": 2641570,
+      "rss_bytes": 568598528,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3253
+    },
+    {
+      "pid": 2641333,
+      "rss_bytes": 571789312,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3115
+    },
+    {
+      "pid": 2641541,
+      "rss_bytes": 576671744,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3370
+    },
+    {
+      "pid": 2641628,
+      "rss_bytes": 585084928,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3577
+    },
+    {
+      "pid": 2641484,
+      "rss_bytes": 582533120,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3305
+    },
+    {
+      "pid": 2641692,
+      "rss_bytes": 579608576,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3447
+    },
+    {
+      "pid": 2641746,
+      "rss_bytes": 582909952,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3226
+    },
+    {
+      "pid": 2641925,
+      "rss_bytes": 582455296,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3355
+    },
+    {
+      "pid": 2641893,
+      "rss_bytes": 584527872,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3181
+    },
+    {
+      "pid": 2642031,
+      "rss_bytes": 581255168,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3349
+    },
+    {
+      "pid": 2642026,
+      "rss_bytes": 581234688,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3282
+    },
+    {
+      "pid": 2642144,
+      "rss_bytes": 586940416,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3284
+    },
+    {
+      "pid": 2642293,
+      "rss_bytes": 587632640,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3518
+    },
+    {
+      "pid": 2642146,
+      "rss_bytes": 582352896,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3270
+    },
+    {
+      "pid": 2636330,
+      "rss_bytes": 602456064,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3466
+    },
+    {
+      "pid": 2636311,
+      "rss_bytes": 603758592,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3590
+    },
+    {
+      "pid": 2636328,
+      "rss_bytes": 611102720,
+      "owns_catalog": false,
+      "has_lucene": false,
+      "episode_bytes": 3280
+    }
+  ],
+  "scoring_payload_bytes": [
+    59984,
+    59984,
+    59984,
+    59984,
+    59984,
+    59984,
+    59984,
+    59984,
+    59870,
+    59870,
+    59870,
+    59870,
+    59870,
+    59870,
+    59870,
+    59870,
+    60187,
+    60187,
+    60187,
+    60187,
+    60187,
+    60187,
+    60187,
+    60187,
+    59998,
+    59998,
+    59998,
+    59998,
+    59998,
+    59998,
+    59998,
+    59998,
+    59986,
+    59986,
+    59986,
+    59986,
+    59986,
+    59986,
+    59986,
+    59986,
+    59991,
+    59991,
+    59991,
+    59991,
+    59991,
+    59991,
+    59991,
+    59991,
+    60074,
+    60074,
+    60074,
+    60074,
+    60074,
+    60074,
+    60074,
+    60074,
+    60012,
+    60012,
+    60012,
+    60012,
+    60012,
+    60012,
+    60012,
+    60012,
+    60047,
+    60047,
+    60047,
+    60047,
+    60047,
+    60047,
+    60047,
+    60047,
+    59917,
+    59917,
+    59917,
+    59917,
+    59917,
+    59917,
+    59917,
+    59917,
+    60237,
+    60237,
+    60237,
+    60237,
+    60237,
+    60237,
+    60237,
+    60237,
+    60319,
+    60319,
+    60319,
+    60319,
+    60319,
+    60319,
+    60319,
+    60319,
+    60226,
+    60226,
+    60226,
+    60226,
+    60226,
+    60226,
+    60226,
+    60226,
+    59896,
+    59896,
+    59896,
+    59896,
+    59896,
+    59896,
+    59896,
+    59896,
+    60225,
+    60225,
+    60225,
+    60225,
+    60225,
+    60225,
+    60225,
+    60225,
+    59916,
+    59916,
+    59916,
+    59916,
+    59916,
+    59916,
+    59916,
+    59916
+  ],
+  "node_memory_used_fraction": 0.3161720943309493
+}

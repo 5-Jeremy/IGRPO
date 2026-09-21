@@ -27,24 +27,34 @@ class WebshopWorker:
     """
     
     def __init__(self, seed, env_kwargs):
-        # Lazy import avoids CUDA initialisation issues
-        import sys
-        import os
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), 'webshop'))
-        sys.path.append(project_root)
-        from web_agent_site.envs import WebAgentTextEnv  # noqa: WPS433 (runtime import)
-        
+        env_kwargs = dict(env_kwargs)
+        backend = env_kwargs.pop('backend', 'legacy')
+        env_kwargs.pop('catalog_settings', None)
         env_kwargs['seed'] = seed
-        self.env = gym.make('WebAgentTextEnv-v0', **env_kwargs)
-    
+        if backend == 'centralized':
+            from .remote_text_env import RemoteWebAgentTextEnv
+            self.env = RemoteWebAgentTextEnv(**env_kwargs)
+        elif backend == 'legacy':
+            from .catalog_data import native_imports
+            native_imports()
+            from web_agent_site.envs import WebAgentTextEnv
+            self.env = WebAgentTextEnv(**env_kwargs)
+        else:
+            raise ValueError(f'Unknown WebShop backend: {backend}')
+
+    def page_type(self):
+        env = self.env.unwrapped
+        if hasattr(env, 'page_type'):
+            return env.page_type
+        return env.server.get_page_name(env.browser.current_url)
+
     def step(self, action):
         """Execute a step in the environment"""
         obs, reward, done, info = self.env.step(action)
         info = dict(info or {})  # make a *copy* so we can mutate safely
-        info['available_actions'] = self.env.get_available_actions()
+        info.setdefault('available_actions', self.env.get_available_actions())
         info['task_score'] = reward
-        env = self.env.unwrapped
-        info['page_type'] = env.server.get_page_name(env.browser.current_url)
+        info.setdefault('page_type', self.page_type())
 
         # Redefine reward. We only use rule-based reward - win for 10, lose for 0.
         if done and reward == 1.0:
@@ -60,9 +70,8 @@ class WebshopWorker:
         """Reset the environment with given session index"""
         obs, info = self.env.reset(session=idx)
         info = dict(info or {})
-        info['available_actions'] = self.env.get_available_actions()
-        env = self.env.unwrapped
-        info['page_type'] = env.server.get_page_name(env.browser.current_url)
+        info.setdefault('available_actions', self.env.get_available_actions())
+        info.setdefault('page_type', self.page_type())
         info['won'] = False
         return obs, info
     
@@ -75,10 +84,20 @@ class WebshopWorker:
         """Get available actions"""
         return self.env.get_available_actions()
     
-    def get_goals(self):
-        """Get environment goals"""
-        return self.env.server.goals
+    def get_goal_count(self):
+        env = self.env.unwrapped
+        return env.goal_count if hasattr(env, "goal_count") else len(env.server.goals)
     
+    def diagnostics(self):
+        import os
+        import pickle
+        import sys
+        import psutil
+        env = self.env.unwrapped
+        return dict(pid=os.getpid(), rss_bytes=psutil.Process().memory_info().rss,
+                    owns_catalog=hasattr(env, 'server'), has_lucene='jnius' in sys.modules,
+                    episode_bytes=len(pickle.dumps(env.export_episode())) if hasattr(env, 'export_episode') else None)
+
     def close(self):
         """Close the environment"""
         self.env.close()
@@ -104,6 +123,7 @@ class WebshopMultiProcessEnv(gym.Env):
         is_train: bool = True,
         env_kwargs: dict = None,
         worker_class=None,
+        owns_catalog_service=False,
     ) -> None:
         super().__init__()
 
@@ -111,6 +131,14 @@ class WebshopMultiProcessEnv(gym.Env):
         if not ray.is_initialized():
             ray.init()
 
+        self._closed = False
+        self._workers = []
+        self._owns_catalog_service = owns_catalog_service
+        self._catalog_service = (env_kwargs or {}).get("catalog_service")
+        settings = (env_kwargs or {}).get("catalog_settings", {})
+        self._batch_requests = settings.get("batch_requests", True)
+        self._catalog_batch_size = settings.get("max_batch_size", 256)
+        self._catalog_timeout = settings.get("request_timeout_s", 120)
         self.group_n = group_n
         self.env_num = env_num
         self.num_processes = env_num * group_n
@@ -124,29 +152,26 @@ class WebshopMultiProcessEnv(gym.Env):
         # -------------------------- Ray actors setup --------------------------
         env_worker = ray.remote(**resources_per_worker)(worker_class or WebshopWorker)
         self._workers = []
-        for i in range(self.num_processes):
-            worker = env_worker.remote(seed + (i // self.group_n), self._env_kwargs)
-            self._workers.append(worker)
+        try:
+            for i in range(self.num_processes):
+                worker_seed = self._env_kwargs["validation"]["seed"] if self._env_kwargs.get("goal_split") == "validation" else seed + (i // self.group_n)
+                worker = env_worker.remote(worker_seed, self._env_kwargs)
+                self._workers.append(worker)
 
-        # Get goals from the first worker
-        goals_future = self._workers[0].get_goals.remote()
-        goals = ray.get(goals_future)
+            # Fetch a scalar only; never transfer the complete goal set.
+            counts = ray.get([worker.get_goal_count.remote() for worker in self._workers], timeout=settings.get("startup_timeout_s", 1800))
+            goal_count = counts[0]
 
-        # ------- original ----------#
-        # if args.num is None:
-        #     if split == 'test':
-        #         self.goal_idxs = range(500)
-        #     elif split == 'eval':
-        #         self.goal_idxs = range(500, 1500)
-        #     elif split == 'train':
-        #         self.goal_idxs = range(1500, len(self.env.server.goals))
-        # else:
-        #     self.goal_idxs = range(len(self.env.server.goals))
+        except BaseException:
+            self.close()
+            raise
 
-        if not self.is_train:
-            self.goal_idxs = range(500)
+        if self._env_kwargs.get("validation"):
+            self.goal_idxs = range(goal_count)
+        elif not self.is_train:
+            self.goal_idxs = range(min(500, goal_count))
         else:
-            self.goal_idxs = range(500, len(goals))
+            self.goal_idxs = range(500, goal_count)
             
         print(self.goal_idxs)
 
@@ -220,23 +245,21 @@ class WebshopMultiProcessEnv(gym.Env):
         if getattr(self, '_closed', False):
             return
 
-        # Close all workers and kill Ray actors
-        close_futures = []
-        for worker in self._workers:
-            future = worker.close.remote()
-            close_futures.append(future)
-        
-        # Wait for all workers to close
-        ray.get(close_futures)
-        
-        # Kill all Ray actors
-        for worker in self._workers:
-            ray.kill(worker)
-            
         self._closed = True
+        try:
+            if self._workers:
+                ray.get([worker.close.remote() for worker in self._workers], timeout=30)
+        finally:
+            for worker in self._workers:
+                ray.kill(worker, no_restart=True)
+            if self._owns_catalog_service and self._catalog_service is not None:
+                try:
+                    from .catalog_service import CatalogRequest
+                    ray.get(self._catalog_service.call.remote(CatalogRequest("flush_metrics")), timeout=10)
+                finally:
+                    ray.kill(self._catalog_service, no_restart=True)
 
-    def __del__(self):  # noqa: D401
-        self.close()
+    # No destructor RPC: trainer owns explicit, idempotent cleanup.
 
 
 # -----------------------------------------------------------------------------
@@ -251,6 +274,7 @@ def build_webshop_envs(
     is_train: bool = True,
     env_kwargs: dict = None,
     worker_class=None,
+    owns_catalog_service=False,
 ):
     """Mirror *build_sokoban_envs* so higher‑level code can swap seamlessly."""
     return WebshopMultiProcessEnv(
@@ -261,4 +285,5 @@ def build_webshop_envs(
         is_train=is_train,
         env_kwargs=env_kwargs,
         worker_class=worker_class,
+        owns_catalog_service=owns_catalog_service,
     )

@@ -13,7 +13,6 @@ from tqdm import tqdm
 from rank_bm25 import BM25Okapi
 from flask import render_template_string
 from rich import print
-from pyserini.search.lucene import LuceneSearcher
 
 from web_agent_site.utils import (
     BASE_DIR,
@@ -151,12 +150,13 @@ def get_top_n_product_from_keywords(
         all_products,
         product_item_dict,
         attribute_to_asins=None,
+        rng=None,
     ):
     if keywords[0] == '<r>':
-        top_n_products = random.sample(all_products, k=SEARCH_RETURN_N)
+        top_n_products = (rng or random).sample(all_products, k=min(SEARCH_RETURN_N, len(all_products)))
     elif keywords[0] == '<a>':
         attribute = ' '.join(keywords[1:]).strip()
-        asins = attribute_to_asins[attribute]
+        asins = attribute_to_asins.get(attribute, ())
         top_n_products = [p for p in all_products if p['asin'] in asins]
     elif keywords[0] == '<c>':
         category = keywords[1].strip()
@@ -177,7 +177,8 @@ def get_product_per_page(top_n_products, page):
     return top_n_products[(page - 1) * PRODUCT_WINDOW:page * PRODUCT_WINDOW]
 
 
-def generate_product_prices(all_products):
+def generate_product_prices(all_products, rng=None):
+    rng = rng or random
     product_prices = dict()
     for product in all_products:
         asin = product['asin']
@@ -187,12 +188,12 @@ def generate_product_prices(all_products):
         elif len(pricing) == 1:
             price = pricing[0]
         else:
-            price = random.uniform(*pricing[:2])
+            price = rng.uniform(*pricing[:2])
         product_prices[asin] = price
     return product_prices
 
 
-def init_search_engine(num_products=None):
+def search_index_path(num_products=None):
     if num_products == 100:
         indexes = 'indexes_100'
     elif num_products == 1000:
@@ -203,8 +204,13 @@ def init_search_engine(num_products=None):
         indexes = 'indexes'
     else:
         raise NotImplementedError(f'num_products being {num_products} is not supported yet.')
-    search_engine = LuceneSearcher(os.path.join(BASE_DIR, f'../search_engine/{indexes}'))
-    return search_engine
+    return os.path.abspath(os.path.join(BASE_DIR, f'../search_engine/{indexes}'))
+
+
+def init_search_engine(num_products=None, index_path=None):
+    from pyserini.search.lucene import LuceneSearcher
+
+    return LuceneSearcher(index_path or search_index_path(num_products))
 
 
 def clean_product_keys(products):
@@ -227,7 +233,7 @@ def clean_product_keys(products):
     return products
 
 
-def load_products(filepath, attrpath, num_products=None, human_goals=True):
+def load_catalog_products(filepath, attrpath, num_products=None, human_goals=True, human_attr_path=None, include_human_goals=False):
     # TODO: move to preprocessing step -> enforce single source of truth
     with open(filepath) as f:
         products = json.load(f)
@@ -242,13 +248,11 @@ def load_products(filepath, attrpath, num_products=None, human_goals=True):
     #     all_reviews[r['asin']] = r['reviews']
     #     all_ratings[r['asin']] = r['average_rating']
 
-    if human_goals:
-        with open(HUMAN_ATTR_PATH) as f:
+    if human_goals or include_human_goals:
+        with open(human_attr_path or HUMAN_ATTR_PATH) as f:
             human_attributes = json.load(f)
     with open(attrpath) as f:
         attributes = json.load(f)
-    with open(HUMAN_ATTR_PATH) as f:
-        human_attributes = json.load(f)
     print('Attributes loaded.')
 
     asins = set()
@@ -338,10 +342,10 @@ def load_products(filepath, attrpath, num_products=None, human_goals=True):
         else:
             products[i]['Attributes'] = ['DUMMY_ATTR']
             
-        if human_goals:
+        if human_goals or include_human_goals:
             if asin in human_attributes:
                 products[i]['instructions'] = human_attributes[asin]
-        else:
+        if not human_goals:
             products[i]['instruction_text'] = \
                 attributes[asin].get('instruction', None)
 
@@ -358,5 +362,9 @@ def load_products(filepath, attrpath, num_products=None, human_goals=True):
             attribute_to_asins[a].add(p['asin'])
 
     product_item_dict = {p['asin']: p for p in all_products}
-    product_prices = generate_product_prices(all_products)
-    return all_products, product_item_dict, product_prices, attribute_to_asins
+    return all_products, product_item_dict, attribute_to_asins
+
+
+def load_products(filepath, attrpath, num_products=None, human_goals=True):
+    products, items, attributes = load_catalog_products(filepath, attrpath, num_products, human_goals)
+    return products, items, generate_product_prices(products), attributes

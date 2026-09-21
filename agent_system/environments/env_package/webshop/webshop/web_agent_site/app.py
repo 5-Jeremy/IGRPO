@@ -1,280 +1,151 @@
-import argparse, json, logging, random
-from pathlib import Path
+"""Browser presentation adapter over the same catalog core used by training.
+
+Use create_app() for standalone WSGI, or pass a Ray actor handle to attach without
+loading another catalog. Standalone mode supports one WSGI process only.
+"""
+import argparse
+import json
+import logging
+import random
 from ast import literal_eval
+from pathlib import Path
+from uuid import uuid4
 
-from flask import (
-    Flask,
-    request,
-    redirect,
-    url_for
-)
-
-from rich import print
-
-from web_agent_site.engine.engine import (
-    load_products,
-    init_search_engine,
-    convert_web_app_string_to_var,
-    get_top_n_product_from_keywords,
-    get_product_per_page,
-    map_action_to_html,
-    END_BUTTON
-)
-from web_agent_site.engine.goal import get_reward, get_goals
-from web_agent_site.utils import (
-    generate_mturk_code,
-    setup_logger,
-    DEFAULT_FILE_PATH,
-    DEBUG_PROD_SIZE,
-)
-
-app = Flask(__name__)
-
-search_engine = None
-all_products = None
-product_item_dict = None
-product_prices = None
-attribute_to_asins = None
-goals = None
-weights = None
-
-user_sessions = dict()
-user_log_dir = None
-SHOW_ATTRS_TAB = False
-
-@app.route('/')
-def home():
-    return redirect(url_for('index', session_id="abc"))
-
-@app.route('/<session_id>', methods=['GET', 'POST'])
-def index(session_id):
-    global user_log_dir
-    global all_products, product_item_dict, \
-           product_prices, attribute_to_asins, \
-           search_engine, \
-           goals, weights, user_sessions
-
-    if search_engine is None:
-        all_products, product_item_dict, product_prices, attribute_to_asins = \
-            load_products(
-                filepath=DEFAULT_FILE_PATH,
-                num_products=DEBUG_PROD_SIZE
-            )
-        search_engine = init_search_engine(num_products=DEBUG_PROD_SIZE)
-        goals = get_goals(all_products, product_prices)
-        random.seed(233)
-        random.shuffle(goals)
-        weights = [goal['weight'] for goal in goals]
-
-    if session_id not in user_sessions and 'fixed' in session_id:
-        goal_dix = int(session_id.split('_')[-1])
-        goal = goals[goal_dix]
-        instruction_text = goal['instruction_text']
-        user_sessions[session_id] = {'goal': goal, 'done': False}
-        if user_log_dir is not None:
-            setup_logger(session_id, user_log_dir)
-    elif session_id not in user_sessions:
-        goal = random.choices(goals, weights)[0]
-        instruction_text = goal['instruction_text']
-        user_sessions[session_id] = {'goal': goal, 'done': False}
-        if user_log_dir is not None:
-            setup_logger(session_id, user_log_dir)
-    else:
-        instruction_text = user_sessions[session_id]['goal']['instruction_text']
-
-    if request.method == 'POST' and 'search_query' in request.form:
-        keywords = request.form['search_query'].lower().split(' ')
-        return redirect(url_for(
-            'search_results',
-            session_id=session_id,
-            keywords=keywords,
-            page=1,
-        ))
-    if user_log_dir is not None:
-        logger = logging.getLogger(session_id)
-        logger.info(json.dumps(dict(
-            page='index',
-            url=request.url,
-            goal=user_sessions[session_id]['goal'],
-        )))
-    return map_action_to_html(
-        'start',
-        session_id=session_id,
-        instruction_text=instruction_text,
-    )
+from flask import Flask, abort, redirect, request, url_for
 
 
-@app.route(
-    '/search_results/<session_id>/<keywords>/<page>',
-    methods=['GET', 'POST']
-)
-def search_results(session_id, keywords, page):
-    instruction_text = user_sessions[session_id]['goal']['instruction_text']
-    page = convert_web_app_string_to_var('page', page)
-    keywords = convert_web_app_string_to_var('keywords', keywords)
-    top_n_products = get_top_n_product_from_keywords(
-        keywords,
-        search_engine,
-        all_products,
-        product_item_dict,
-        attribute_to_asins,
-    )
-    products = get_product_per_page(top_n_products, page)
-    html = map_action_to_html(
-        'search',
-        session_id=session_id,
-        products=products,
-        keywords=keywords,
-        page=page,
-        total=len(top_n_products),
-        instruction_text=instruction_text,
-    )
-    logger = logging.getLogger(session_id)
-    logger.info(json.dumps(dict(
-        page='search_results',
-        url=request.url,
-        goal=user_sessions[session_id]['goal'],
-        content=dict(
-            keywords=keywords,
-            search_result_asins=[p['asin'] for p in products],
-            page=page,
-        )
-    )))
-    return html
+def create_app(service=None, *, env_kwargs=None, settings=None, seed=233, log_dir=None):
+    from agent_system.environments.env_package.webshop.catalog_service import CatalogClient, WebshopCatalogService, resolve_catalog_config
+    from web_agent_site.utils import setup_logger, generate_mturk_code
+    from web_agent_site.engine.engine import map_action_to_html
 
+    if service is None:
+        service = WebshopCatalogService(resolve_catalog_config(env_kwargs or {}, settings))
+    client = CatalogClient(service)
+    metadata = client.call("metadata")
+    client.catalog_key = metadata.catalog_key
+    ref = client.call("get_seed_view", seed=seed)
+    app = Flask(__name__)
+    sessions = {}
+    rng = random.Random(seed)
+    app.extensions["webshop_catalog"] = client
 
-@app.route(
-    '/item_page/<session_id>/<asin>/<keywords>/<page>/<options>',
-    methods=['GET', 'POST']
-)
-def item_page(session_id, asin, keywords, page, options):
-    options = literal_eval(options)
-    product_info = product_item_dict[asin]
+    def session_for(session_id):
+        if not session_id or len(session_id) > 128 or not all(c.isalnum() or c in "_-" for c in session_id):
+            abort(400, "Invalid session ID")
+        if session_id not in sessions:
+            if session_id.startswith("fixed_"):
+                try:
+                    index = int(session_id[6:])
+                except ValueError:
+                    abort(400, "Invalid goal index")
+            else:
+                index = client.call("sample_goal_index", seed_view=ref, random_token=str(rng.getrandbits(128)))
+            if not 0 <= index < ref.goal_count:
+                abort(400, "Goal index out of range")
+            opaque_id = uuid4().hex
+            sessions[session_id] = dict(goal=client.call("get_goal", seed_view=ref, goal_index=index), opaque_id=opaque_id)
+            if log_dir:
+                setup_logger(opaque_id, Path(log_dir))
+        return sessions[session_id]
 
-    goal_instruction = user_sessions[session_id]['goal']['instruction_text']
-    product_info['goal_instruction'] = goal_instruction
+    def options_from_url(value):
+        if len(value) > 4096:
+            abort(400, "Options too long")
+        try:
+            # Native templates use Python dict representations in browser URLs.
+            options = literal_eval(value)
+            if not isinstance(options, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in options.items()):
+                raise ValueError()
+            return tuple(options.items())
+        except (ValueError, SyntaxError):
+            abort(400, "Invalid options")
 
-    html = map_action_to_html(
-        'click',
-        session_id=session_id,
-        product_info=product_info,
-        keywords=keywords,
-        page=page,
-        asin=asin,
-        options=options,
-        instruction_text=goal_instruction,
-        show_attrs=SHOW_ATTRS_TAB,
-    )
-    logger = logging.getLogger(session_id)
-    logger.info(json.dumps(dict(
-        page='item_page',
-        url=request.url,
-        goal=user_sessions[session_id]['goal'],
-        content=dict(
-            keywords=keywords,
-            page=page,
-            asin=asin,
-            options=options,
-        )
-    )))
-    return html
+    def query_from_url(keywords, page):
+        if len(keywords) > 4096:
+            abort(400, "Query too long")
+        try:
+            terms = literal_eval(keywords) if keywords.startswith("[") else keywords.replace("+", " ").split()
+            return tuple(terms), int(page)
+        except (ValueError, SyntaxError, TypeError):
+            abort(400, "Invalid query")
 
+    def event(session, page, **details):
+        if log_dir:
+            logging.getLogger(session["opaque_id"]).info(json.dumps(dict(page=page, url=request.url, **details)))
 
-@app.route(
-    '/item_sub_page/<session_id>/<asin>/<keywords>/<page>/<sub_page>/<options>',
-    methods=['GET', 'POST']
-)
-def item_sub_page(session_id, asin, keywords, page, sub_page, options):
-    options = literal_eval(options)
-    product_info = product_item_dict[asin]
+    @app.route("/")
+    def home():
+        return redirect(url_for("index", session_id=uuid4().hex))
 
-    goal_instruction = user_sessions[session_id]['goal']['instruction_text']
-    product_info['goal_instruction'] = goal_instruction
+    @app.route("/<session_id>", methods=["GET", "POST"])
+    def index(session_id):
+        session = session_for(session_id)
+        if request.method == "POST" and "search_query" in request.form:
+            return redirect(url_for("search_results", session_id=session_id, keywords=request.form["search_query"].lower().split(" "), page=1))
+        event(session, "index")
+        return client.call("render_start", episode_id=session_id, goal=session["goal"]).html
 
-    html = map_action_to_html(
-        f'click[{sub_page}]',
-        session_id=session_id,
-        product_info=product_info,
-        keywords=keywords,
-        page=page,
-        asin=asin,
-        options=options,
-        instruction_text=goal_instruction
-    )
-    logger = logging.getLogger(session_id)
-    logger.info(json.dumps(dict(
-        page='item_sub_page',
-        url=request.url,
-        goal=user_sessions[session_id]['goal'],
-        content=dict(
-            keywords=keywords,
-            page=page,
-            asin=asin,
-            options=options,
-        )
-    )))
-    return html
+    @app.route("/search_results/<session_id>/<keywords>/<page>", methods=["GET", "POST"])
+    def search_results(session_id, keywords, page):
+        session = session_for(session_id)
+        terms, page = query_from_url(keywords, page)
+        rendered, asins = client.call("search_and_render", episode_id=session_id, seed_view=ref, goal=session["goal"], keywords=terms, page=page,
+                                     random_token=f"{session['opaque_id']}:{keywords}:{page}")
+        event(session, "search_results", search_result_asins=asins)
+        return rendered.html
 
+    @app.route("/item_page/<session_id>/<asin>/<keywords>/<page>/<options>", methods=["GET", "POST"])
+    def item_page(session_id, asin, keywords, page, options):
+        return render_product(session_id, asin, keywords, page, options)
 
-@app.route('/done/<session_id>/<asin>/<options>', methods=['GET', 'POST'])
-def done(session_id, asin, options):
-    options = literal_eval(options)
-    goal = user_sessions[session_id]['goal']
-    purchased_product = product_item_dict[asin]
-    price = product_prices[asin]
+    @app.route("/item_sub_page/<session_id>/<asin>/<keywords>/<page>/<sub_page>/<options>", methods=["GET", "POST"])
+    def item_sub_page(session_id, asin, keywords, page, sub_page, options):
+        return render_product(session_id, asin, keywords, page, options, sub_page)
 
-    reward, reward_info = get_reward(
-        purchased_product,
-        goal,
-        price=price,
-        options=options,
-        verbose=True
-    )
-    user_sessions[session_id]['done'] = True
-    user_sessions[session_id]['reward'] = reward
-    print(user_sessions)
+    def render_product(session_id, asin, keywords, page, options, subpage=None):
+        session = session_for(session_id)
+        terms, page = query_from_url(keywords, page)
+        response = client.call("render_item", episode_id=session_id, seed_view=ref, goal=session["goal"], asin=asin,
+                               keywords=terms, page=page, selected_options=options_from_url(options), subpage=subpage)
+        event(session, response.page_type, asin=asin)
+        return response.html
 
-    logger = logging.getLogger(session_id)
-    logger.info(json.dumps(dict(
-        page='done',
-        url=request.url,
-        goal=goal,
-        content=dict(
-            asin=asin,
-            options=options,
-            price=price,
-        ),
-        reward=reward,
-        reward_info=reward_info,
-    )))
-    del logging.root.manager.loggerDict[session_id]
-    
-    return map_action_to_html(
-        f'click[{END_BUTTON}]',
-        session_id=session_id,
-        reward=reward,
-        asin=asin,
-        options=options,
-        reward_info=reward_info,
-        query=purchased_product['query'],
-        category=purchased_product['category'],
-        product_category=purchased_product['product_category'],
-        goal_attrs=user_sessions[session_id]['goal']['attributes'],
-        purchased_attrs=purchased_product['Attributes'],
-        goal=goal,
-        mturk_code=generate_mturk_code(session_id),
-    )
+    @app.route("/done/<session_id>/<asin>/<options>", methods=["GET", "POST"])
+    def done(session_id, asin, options):
+        session = session_for(session_id)
+        purchase, rendered = client.call("purchase_and_render", episode_id=session_id, seed_view=ref, goal=session["goal"], asin=asin, selected_options=options_from_url(options))
+        event(session, "done", reward=purchase.reward, reward_info=purchase.verbose_info)
+        product = purchase.product
+        options = options_from_url(options)
+        return map_action_to_html("click[Buy Now]", session_id=session_id, reward=purchase.reward, asin=asin,
+            options=dict(options), reward_info=purchase.verbose_info, query=product["query"], category=product["category"],
+            product_category=product["product_category"], goal_attrs=session["goal"]["attributes"], purchased_attrs=product["Attributes"],
+            goal=session["goal"], mturk_code=generate_mturk_code(session_id))
+
+    return app
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="WebShop flask app backend configuration")
-    parser.add_argument("--log", action='store_true', help="Log actions on WebShop in trajectory file")
-    parser.add_argument("--attrs", action='store_true', help="Show attributes tab in item page")
-
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[6]))
+    parser = argparse.ArgumentParser(description="WebShop browser catalog adapter")
+    parser.add_argument("--log", action="store_true")
+    parser.add_argument("--attrs", action="store_true")
+    parser.add_argument("--full", action="store_true")
+    parser.add_argument("--actor-name", help="Attach to an existing Ray catalog actor")
+    parser.add_argument("--actor-namespace")
     args = parser.parse_args()
-    if args.log:
-        user_log_dir = Path('user_session_logs/mturk')
-        user_log_dir.mkdir(parents=True, exist_ok=True)
-    SHOW_ATTRS_TAB = args.attrs
-
-    app.run(host='0.0.0.0', port=3000)
+    service = None
+    if args.actor_name:
+        import ray
+        ray.init(address="auto", namespace=args.actor_namespace)
+        service = ray.get_actor(args.actor_name, namespace=args.actor_namespace)
+    data = Path(__file__).resolve().parent.parent / "data"
+    suffix = "" if args.full else "_1000"
+    log_dir = Path("user_session_logs/mturk") if args.log else None
+    if log_dir:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    app = create_app(service, env_kwargs=dict(file_path=str(data / f"items_shuffle{suffix}.json"), attr_path=str(data / f"items_ins_v2{suffix}.json"),
+                     num_products=None if args.full else 1000, human_goals=True, show_attrs=args.attrs), log_dir=log_dir)
+    app.run(host="127.0.0.1", port=3000)

@@ -21,7 +21,6 @@ from web_agent_site.engine.engine import (
     ACTION_TO_TEMPLATE,
     END_BUTTON, NEXT_PAGE, PREV_PAGE, BACK_TO_SEARCH,
 )
-from web_agent_site.engine.goal import get_reward, get_goals
 from web_agent_site.utils import (
     DEFAULT_FILE_PATH,
     DEFAULT_ATTR_PATH,
@@ -79,6 +78,9 @@ class WebAgentTextEnv(gym.Env):
             self.kwargs.get('num_products'),
             self.kwargs.get('human_goals'),
             self.kwargs.get('show_attrs', False),
+            validation=self.kwargs.get('validation'),
+            goal_split=self.kwargs.get('goal_split', 'train'),
+            human_attr_path=self.kwargs.get('human_attr_path'),
         ) if server is None else server
         self.browser = SimBrowser(self.server)
 
@@ -299,6 +301,9 @@ class SimServer:
         num_products=None,
         human_goals=0,
         show_attrs=False,
+        validation=None,
+        goal_split="train",
+        human_attr_path=None,
     ):
         """
         Constructor for simulated server serving WebShop application
@@ -309,17 +314,29 @@ class SimServer:
         num_products (`int`) -- Number of products to search across
         human_goals (`bool`) -- If true, load human goals; otherwise, load synthetic goals
         """
+        from web_agent_site.engine.goal import get_goals
+
         # Load all products, goals, and search engine
         self.base_url = base_url
-        self.all_products, self.product_item_dict, self.product_prices, _ = \
-            load_products(filepath=file_path, attrpath=attr_path, num_products=num_products, human_goals=human_goals)
+        if validation:
+            from web_agent_site.engine.engine import load_catalog_products, generate_product_prices
+            from web_agent_site.engine.goal import get_split_goals
+            self.all_products, self.product_item_dict, _ = load_catalog_products(
+                file_path, attr_path, num_products, human_goals, human_attr_path,
+                include_human_goals=True)
+            view_seed = validation["seed"] if goal_split == "validation" else seed
+            rng = random.Random(view_seed)
+            self.product_prices = generate_product_prices(self.all_products, rng=rng)
+            self.goals = get_split_goals(self.all_products, self.product_prices,
+                human_goals, rng, goal_split, validation, seed)
+        else:
+            self.all_products, self.product_item_dict, self.product_prices, _ = load_products(
+                filepath=file_path, attrpath=attr_path, num_products=num_products, human_goals=human_goals)
+            self.goals = get_goals(self.all_products, self.product_prices, human_goals)
+            random.seed(seed)
+            random.shuffle(self.goals)
         self.search_engine = init_search_engine(num_products=num_products)
-        self.goals = get_goals(self.all_products, self.product_prices, human_goals)
         self.show_attrs = show_attrs
-
-        # Fix outcome for random shuffling of goals
-        random.seed(seed)
-        random.shuffle(self.goals)
 
         # Apply `filter_goals` parameter if exists to select speific goal(s)
         if filter_goals is not None:
@@ -490,6 +507,8 @@ class SimServer:
         price = self.product_prices.get(session["asin"])
 
         # Calculate reward for selected product and set variables for page details
+        from web_agent_site.engine.goal import get_reward
+
         reward, info = get_reward(
             purchased_product,
             goal,
@@ -654,3 +673,11 @@ class SimBrowser:
                 keywords=keywords,
         )
         return status
+
+def __getattr__(name):
+    # Standalone testbeds historically imported these helpers through this module.
+    # Keep them lazy so text-only rollout clients never load the reward NLP model.
+    if name in {"get_reward", "get_goals"}:
+        from web_agent_site.engine import goal
+        return getattr(goal, name)
+    raise AttributeError(name)

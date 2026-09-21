@@ -342,5 +342,29 @@ env:
     search_depth: 30
     mode: tiny_rgb_array
   webshop:
+    backend: null # null: legacy for small catalog, centralized for full catalog
     use_small: True
-    human_goals: False
+    human_goals: False # training goals only; validation always uses human goals
+    validation:
+      seed: 233 # fixed prices and human-goal price limits
+      shuffle_seed: 233 # official ordering (requires the full catalog)
+      count: 500
+    catalog_service:
+      transport: ray
+      actor_name: webshop_catalog # run-unique suffix added automatically
+      actor_namespace: null
+      attach: false # requires exact configuration and content fingerprint
+      num_cpus: 4
+      search_concurrency: 1
+      request_timeout_s: 120
+      startup_timeout_s: 1800
+      startup_smoke_test: true
+      seed_view_cache_size: 64
+      product_subset_cache_size: 4096
+      search_cache_size: 1024
+      max_pending_requests: 64
+      batch_requests: true
+      max_batch_size: 256
+      max_response_bytes: 16777216
+      index_path: null
+      human_attr_path: null
