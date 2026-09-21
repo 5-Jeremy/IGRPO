@@ -32,6 +32,8 @@ from collections import defaultdict
 import numpy as np
 import torch
 
+from verl.trainer.ppo.core_algos import compute_grpo_outcome_advantage
+
 
 def _gt_prob(raw_value, prob_diff_mode: bool, prob_floor: float) -> float:
     """Ground-truth answer probability of a node.
@@ -189,6 +191,133 @@ def compute_treehca_outcome_advantage(token_level_rewards: torch.Tensor,
         "treehca/leaf_adv/mean": node_advantages[leaf_rows].mean().item() if leaf_rows else 0.0,
         "treehca/internal_adv/mean": node_advantages[internal_rows].mean().item() if internal_rows else 0.0,
         "treehca/internal_adv/abs_mean": node_advantages[internal_rows].abs().mean().item() if internal_rows else 0.0,
+    }
+
+    return advantages, advantages, metrics
+
+
+def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
+                                        response_mask: torch.Tensor,
+                                        uid: np.ndarray,
+                                        node_uid: np.ndarray,
+                                        parent_node_uid: np.ndarray,
+                                        is_terminal: np.ndarray,
+                                        info_gain_sum: np.ndarray,
+                                        traj_step: np.ndarray,
+                                        prob_diff_mode: bool = True,
+                                        prob_floor: float = 1e-6,
+                                        max_inv_ratio: float = 2.0,
+                                        q_weight: float = 0.3,
+                                        norm_adv_by_std: bool = True):
+    """GRPO advantage blended with a hindsight-weighted Q term.
+
+        A = (1 - q_weight) * A_grpo + q_weight * A_aux
+
+    The primary signal is the ordinary GRPO advantage, computed by the shared
+    :func:`compute_grpo_outcome_advantage` so it is identical to what IGRPO uses.
+    It keeps the majority of the weight because the auxiliary term is the noisier
+    of the two: it depends on p_gt ratios that move with the policy.
+
+    The auxiliary term backs the outcome reward up the tree, a leaf keeping its own
+    reward and a parent averaging its children, which gives every node a Q. That Q is
+    then scaled by how much the node improved the answer's odds,
+
+        A_aux = Q * (1 - 1 / h),   h = p_gt(node) / p_gt(parent)
+
+    A node that made the gold answer more likely has h > 1, so the factor is positive
+    and it keeps its Q. A node that made it less likely has h < 1 and the factor turns
+    negative, so the same Q is charged against it. ``1 / h`` is clipped at
+    ``max_inv_ratio``: at the default of 2 the factor spans [-1, 1] and the term
+    therefore ranges from -Q to +Q, which stops one collapsed child probability from
+    dominating the batch.
+
+    Args:
+        max_inv_ratio: cap on 1 / h, see above
+        q_weight: share of the auxiliary term in the blend. 0 is plain GRPO, 1 is pure
+            hindsight, the default 0.3 is a 70/30 split favouring GRPO
+
+    Returns:
+        advantages / returns: `(torch.Tensor)` shape (bs, response_length)
+        metrics: `(dict)` diagnostics for the logger
+    """
+    if max_inv_ratio <= 0:
+        raise ValueError(f"treehca.max_inv_ratio must be > 0, got {max_inv_ratio}")
+    if not 0.0 <= q_weight <= 1.0:
+        raise ValueError(f"treehca.q_weight must be in [0, 1], got {q_weight}")
+
+    grpo_advantages, _ = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=uid,
+        traj_index=uid,  # unused, compute_mean_std_cross_steps ignores it
+        norm_adv_by_std_in_grpo=norm_adv_by_std,
+        compute_mean_std_cross_steps=True,
+    )
+
+    scores = token_level_rewards.sum(dim=-1)
+    bs = scores.shape[0]
+
+    with torch.no_grad():
+        # collapse duplicated rows: one entry per tree node
+        node_rows = defaultdict(list)
+        for i in range(bs):
+            node_rows[node_uid[i]].append(i)
+        row_of = {node: rows[0] for node, rows in node_rows.items()}
+
+        children = defaultdict(list)
+        for node, i in row_of.items():
+            parent = parent_node_uid[i]
+            if parent in node_rows:
+                children[parent].append(node)
+
+        # Q backup: a leaf keeps its outcome reward, a parent averages its children.
+        # Deepest first, so every child is resolved before its parent is read.
+        q = {}
+        for node in sorted(row_of, key=lambda n: -int(traj_step[row_of[n]])):
+            child_nodes = children[node]
+            if child_nodes:
+                q[node] = sum(q[child] for child in child_nodes) / len(child_nodes)
+            else:
+                q[node] = float(scores[row_of[node]])
+
+        node_aux = {}
+        factors, clipped = [], 0
+        for node, i in row_of.items():
+            p = _gt_prob(info_gain_sum[i], prob_diff_mode, prob_floor)
+            parent = parent_node_uid[i]
+            if parent in row_of:
+                p_parent = _gt_prob(info_gain_sum[row_of[parent]], prob_diff_mode, prob_floor)
+            else:
+                # no parent in the batch: nothing retrieved yet, so the prior sits at
+                # the floor and the node keeps its full +Q
+                p_parent = prob_floor
+            inv_ratio = p_parent / p  # _gt_prob floors p, so this cannot divide by zero
+            if inv_ratio > max_inv_ratio:
+                inv_ratio = max_inv_ratio
+                clipped += 1
+            factor = 1.0 - inv_ratio
+            factors.append(factor)
+            node_aux[node] = q[node] * factor
+
+        aux = torch.zeros_like(scores)
+        for i in range(bs):
+            aux[i] = node_aux[node_uid[i]]
+
+        grpo_term = (1.0 - q_weight) * grpo_advantages
+        aux_term = q_weight * aux.unsqueeze(-1) * response_mask
+        advantages = grpo_term + aux_term
+
+    leaves = [node for node in row_of if len(children[node]) == 0]
+    metrics = {
+        "treehca/node_count": float(len(row_of)),
+        "treehca/leaf_count": float(len(leaves)),
+        "treehca/q/mean": float(np.mean(list(q.values()))) if q else 0.0,
+        "treehca/hindsight_factor/mean": float(np.mean(factors)) if factors else 0.0,
+        "treehca/hindsight_factor/neg_frac": float(np.mean([f < 0 for f in factors])) if factors else 0.0,
+        "treehca/hindsight_factor/clipped_frac": float(clipped) / max(len(row_of), 1),
+        # post-blend, so the two are directly comparable as contributions to the loss
+        "treehca/grpo_adv/abs_mean": grpo_term.abs().mean().item(),
+        "treehca/aux_adv/abs_mean": aux_term.abs().mean().item(),
     }
 
     return advantages, advantages, metrics
