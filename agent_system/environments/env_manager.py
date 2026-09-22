@@ -684,11 +684,15 @@ def make_envs(config):
         else:
             file_path = os.path.join(os.path.dirname(__file__), 'env_package/webshop/webshop/data/items_shuffle.json')
             attr_path = os.path.join(os.path.dirname(__file__), 'env_package/webshop/webshop/data/items_ins_v2.json')
+        synthetic_goal_limit = None
+        if not config.env.webshop.use_small and not config.env.webshop.human_goals:
+            synthetic_goal_limit = config.env.webshop.get('synthetic_goal_limit', 10000)
         env_kwargs = {
                     'observation_mode': 'text', 
                     'num_products': 1000 if config.env.webshop.use_small else None,
                     'backend': config.env.webshop.get('backend') or ('legacy' if config.env.webshop.use_small else 'centralized'),
                     'human_goals': config.env.webshop.human_goals,
+                    'synthetic_goal_limit': synthetic_goal_limit,
                     'file_path': file_path,
                     'attr_path': attr_path
                     }

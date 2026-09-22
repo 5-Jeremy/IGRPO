@@ -163,7 +163,13 @@ class WebshopMultiProcessEnv(gym.Env):
             goal_count = counts[0]
 
         except BaseException:
-            self.close()
+            # Cleanup is best-effort during failed startup. A busy worker may not
+            # answer ``close`` before the timeout; do not hide the root failure
+            # with a secondary GetTimeoutError from cleanup.
+            try:
+                self.close()
+            except BaseException:
+                pass
             raise
 
         if self._env_kwargs.get("validation"):

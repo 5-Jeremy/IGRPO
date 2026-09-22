@@ -345,6 +345,9 @@ env:
     backend: null # null: legacy for small catalog, centralized for full catalog
     use_small: True
     human_goals: False
+    # Full-catalog synthetic runs sample this many implicit product/option goals.
+    # It is ignored for the small catalog and for human goals.
+    synthetic_goal_limit: 10000
     validation:
       # fixed_human: official seed-233 human split; legacy: original seeded first-500 split.
       mode: fixed_human

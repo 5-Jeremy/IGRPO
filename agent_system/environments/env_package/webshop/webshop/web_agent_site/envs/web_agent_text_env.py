@@ -81,6 +81,7 @@ class WebAgentTextEnv(gym.Env):
             validation=self.kwargs.get('validation'),
             goal_split=self.kwargs.get('goal_split', 'train'),
             human_attr_path=self.kwargs.get('human_attr_path'),
+            synthetic_goal_limit=self.kwargs.get('synthetic_goal_limit'),
         ) if server is None else server
         self.browser = SimBrowser(self.server)
 
@@ -304,6 +305,7 @@ class SimServer:
         validation=None,
         goal_split="train",
         human_attr_path=None,
+        synthetic_goal_limit=None,
     ):
         """
         Constructor for simulated server serving WebShop application
@@ -313,6 +315,7 @@ class SimServer:
         limit_goals (`int`) -- Limit to number of goals available
         num_products (`int`) -- Number of products to search across
         human_goals (`bool`) -- If true, load human goals; otherwise, load synthetic goals
+        synthetic_goal_limit (`int`) -- Maximum synthetic goals to materialize
         """
         from web_agent_site.engine.goal import get_goals
 
@@ -328,11 +331,17 @@ class SimServer:
             rng = random.Random(view_seed)
             self.product_prices = generate_product_prices(self.all_products, rng=rng)
             self.goals = get_split_goals(self.all_products, self.product_prices,
-                human_goals, rng, goal_split, validation, seed)
+                human_goals, rng, goal_split, validation, seed,
+                synthetic_goal_limit=synthetic_goal_limit)
         else:
             self.all_products, self.product_item_dict, self.product_prices, _ = load_products(
                 filepath=file_path, attrpath=attr_path, num_products=num_products, human_goals=human_goals)
-            self.goals = get_goals(self.all_products, self.product_prices, human_goals)
+            self.goals = get_goals(
+                self.all_products,
+                self.product_prices,
+                human_goals,
+                synthetic_goal_limit=synthetic_goal_limit,
+            )
             random.seed(seed)
             random.shuffle(self.goals)
         self.search_engine = init_search_engine(num_products=num_products)

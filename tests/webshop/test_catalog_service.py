@@ -302,6 +302,55 @@ def test_human_goal_seed_parity():
     assert list(view.goals) == legacy.server.goals
 
 
+def test_synthetic_goal_limit_samples_implicit_combinations_deterministically():
+    from web_agent_site.engine.goal import get_synthetic_goals
+
+    def product(asin, colors, sizes, attributes):
+        return {
+            "asin": asin,
+            "category": "category",
+            "query": "query",
+            "name": "name",
+            "Title": f"title-{asin}",
+            "product_category": "root › category",
+            "instruction_text": f"find {asin}",
+            "instruction_attributes": attributes,
+            "options": {"color": colors, "size": sizes},
+        }
+
+    products = [
+        {
+            "asin": "no-synthetic-instruction",
+            "instruction_text": None,
+            "instruction_attributes": None,
+            "options": {},
+        },
+        product("a", ["red", "blue", "green"], ["s", "m", "l"], ["common"]),
+        product("b", ["black", "white"], ["one", "two"], ["rare"]),
+    ]
+    limited = get_synthetic_goals(products, None, rng=random.Random(17), limit=5)
+    repeated = get_synthetic_goals(products, None, rng=random.Random(17), limit=5)
+    assert limited == repeated
+    assert len(limited) == 5
+    assert len({(goal["asin"], tuple(goal["goal_options"].items())) for goal in limited}) == 5
+
+    # A non-binding limit retains the original catalog/product ordering exactly.
+    unlimited = get_synthetic_goals(products, None, rng=random.Random(17))
+    assert get_synthetic_goals(products, None, rng=random.Random(17), limit=13) == unlimited
+    weights = {goal["asin"]: goal["weight"] for goal in unlimited}
+    assert all(goal["weight"] == weights[goal["asin"]] for goal in limited)
+
+    # A trillion implicit combinations remain cheap because only sampled
+    # mixed-radix indices are decoded.
+    huge = product(
+        "huge",
+        range(1_000_000),
+        range(1_000_000),
+        ["common"],
+    )
+    assert len(get_synthetic_goals([huge], None, rng=random.Random(17), limit=5)) == 5
+
+
 def test_configuration_and_index_fail_before_worker_creation(service, tmp_path, monkeypatch):
     from web_agent_site.engine import engine
 
@@ -311,6 +360,8 @@ def test_configuration_and_index_fail_before_worker_creation(service, tmp_path, 
         resolve_catalog_config({"file_path": str(tmp_path / "missing.json")})
     with pytest.raises(ConfigurationError, match="limit_goals"):
         resolve_catalog_config({"limit_goals": 0})
+    with pytest.raises(ConfigurationError, match="synthetic_goal_limit"):
+        resolve_catalog_config({"synthetic_goal_limit": 0})
     with pytest.raises(ConfigurationError, match="search_concurrency"):
         resolve_catalog_config({}, {"search_concurrency": 2})
     monkeypatch.setattr(WebshopCatalogData, "load", lambda config: service.data)
@@ -489,6 +540,7 @@ def test_training_factory_uses_independent_validation_config(monkeypatch, backen
     assert val["env_kwargs"]["goal_split"] == "validation"
     assert val["env_kwargs"]["validation"] == dict(seed=233, shuffle_seed=233, count=500)
     assert train["env_kwargs"]["validation"] == val["env_kwargs"]["validation"]
+    assert train["env_kwargs"]["synthetic_goal_limit"] == 10000
     if backend == "centralized":
         assert train["env_kwargs"]["catalog_service"] is val["env_kwargs"]["catalog_service"]
         assert rpc_calls[0] == ("get_seed_view", dict(seed=233, split="validation"))

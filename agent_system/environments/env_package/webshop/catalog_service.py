@@ -116,6 +116,7 @@ def resolve_catalog_config(env_kwargs, settings=None):
         validation=env_kwargs.get("validation"),
         human_goals=bool(env_kwargs.get("human_goals", False)),
         num_products=env_kwargs.get("num_products"),
+        synthetic_goal_limit=env_kwargs.get("synthetic_goal_limit"),
         show_attrs=bool(env_kwargs.get("show_attrs", False)),
         index_path=settings.get("index_path") or search_index_path(env_kwargs.get("num_products")),
         shuffle_goals=settings.get("shuffle_goals", True),
@@ -132,6 +133,11 @@ def resolve_catalog_config(env_kwargs, settings=None):
         if set(validation) != {"seed", "shuffle_seed", "count"} or any(type(v) is not int for v in validation.values()) or validation["count"] < 1:
             raise ConfigurationError("validation requires integer seed, shuffle_seed and positive count")
         config["validation"] = validation
+    if config["synthetic_goal_limit"] is not None and (
+        type(config["synthetic_goal_limit"]) is not int
+        or config["synthetic_goal_limit"] < 1
+    ):
+        raise ConfigurationError("synthetic_goal_limit must be a positive integer or null")
     for key in ("shuffle_goals", "measure_seed_view_bytes"):
         if not isinstance(config[key], bool):
             raise ConfigurationError(f"{key} must be a boolean")

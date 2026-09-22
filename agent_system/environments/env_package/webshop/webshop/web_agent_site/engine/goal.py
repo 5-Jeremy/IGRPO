@@ -2,6 +2,7 @@
 Functions for specifying goals and reward calculations.
 """
 import itertools
+import math
 import random
 import spacy
 from collections import defaultdict
@@ -13,14 +14,21 @@ nlp = spacy.load("en_core_web_sm")
 
 PRICE_RANGE = [10.0 * i for i in range(1, 100)]
 
-def get_goals(all_products, product_prices, human_goals=True, rng=None):
+def get_goals(all_products, product_prices, human_goals=True, rng=None,
+              synthetic_goal_limit=None):
     if human_goals:
         return get_human_goals(all_products, product_prices, rng=rng)
     else:
-        return get_synthetic_goals(all_products, product_prices, rng=rng)
+        return get_synthetic_goals(
+            all_products,
+            product_prices,
+            rng=rng,
+            limit=synthetic_goal_limit,
+        )
     
 def get_split_goals(all_products, product_prices, human_goals, rng, split,
-                    validation, shuffle_seed, shuffle_goals=True):
+                    validation, shuffle_seed, shuffle_goals=True,
+                    synthetic_goal_limit=None):
     """Partition by canonical human-goal positions, independent of worker seeds.
 
     Synthetic training excludes targets of held-out human goals. Keep every
@@ -44,7 +52,12 @@ def get_split_goals(all_products, product_prices, human_goals, rng, split,
     else:
         excluded = {human[i]["asin"] for i in heldout}
         products = [p for p in all_products if p["asin"] not in excluded]
-        goals = get_synthetic_goals(products, product_prices, rng=rng)
+        goals = get_synthetic_goals(
+            products,
+            product_prices,
+            rng=rng,
+            limit=synthetic_goal_limit,
+        )
     if shuffle_goals:
         random.Random(shuffle_seed).shuffle(goals)
     if not goals:
@@ -99,18 +112,73 @@ def get_human_goals(all_products, product_prices, rng=None):
     return goals
 
 
-def get_synthetic_goals(all_products, product_prices, rng=None):
+def _synthetic_goal_count(product):
+    """Return the size of a product's implicit option-combination space."""
+    if product.get('instruction_text') is None:
+        return 0
+    attributes = product['instruction_attributes']
+    assert len(attributes) > 0
+    return math.prod(len(values) for values in product['options'].values())
+
+
+def _option_combination(options, combination_index):
+    """Decode one itertools.product index without constructing all combinations."""
+    option_names = sorted(options)
+    selected = {}
+    for option_name in reversed(option_names):
+        values = options[option_name]
+        combination_index, value_index = divmod(combination_index, len(values))
+        selected[option_name] = values[value_index]
+    return {option_name: selected[option_name] for option_name in option_names}
+
+
+def get_synthetic_goals(all_products, product_prices, rng=None, limit=None):
     rng = rng or random
     goals = []
     cnt_atts = defaultdict(int)
+    selected_indices = None
+    if limit is not None:
+        if type(limit) is not int or limit < 1:
+            raise ValueError('Synthetic goal limit must be a positive integer')
+        total_goals = 0
+        possible_cnt_atts = defaultdict(int)
+        for product in all_products:
+            combination_count = _synthetic_goal_count(product)
+            if combination_count == 0:
+                continue
+            total_goals += combination_count
+            for att in product['instruction_attributes']:
+                possible_cnt_atts[att] += combination_count
+        if limit < total_goals:
+            # ``random.sample`` handles a range without materializing it. Sorting
+            # lets the second catalog pass construct only the selected goals.
+            selected_indices = iter(sorted(rng.sample(range(total_goals), limit)))
+            next_selected = next(selected_indices, None)
+            # Preserve the original inverse-frequency weights without storing
+            # the complete goal list.
+            cnt_atts = possible_cnt_atts
+        else:
+            selected_indices = None
+
+    combination_start = 0
     for product in all_products:
-        if ('instruction_text' not in product or 
-            product['instruction_text'] is None):
+        combination_count = _synthetic_goal_count(product)
+        if combination_count == 0:
             continue
-        product_goals = []        
+        if selected_indices is None:
+            combination_indices = range(combination_count)
+        else:
+            combination_indices = []
+            combination_end = combination_start + combination_count
+            while next_selected is not None and next_selected < combination_end:
+                combination_indices.append(next_selected - combination_start)
+                next_selected = next(selected_indices, None)
+            combination_start = combination_end
+            if not combination_indices:
+                continue
+
         asin = product['asin']
         attributes = product['instruction_attributes']
-        assert len(attributes) > 0
 
         if product_prices is not None:
             price = product_prices[asin]
@@ -129,20 +197,26 @@ def get_synthetic_goals(all_products, product_prices, rng=None):
         instruction_text = product['instruction_text']
 
         options = product['options']
-        option_names = sorted(options)
-        combinations = list(itertools.product(
-            *(options[option_name] for option_name in option_names)
-        ))
-        for combination in combinations:
-            goal_options = dict()
-            for i, o in enumerate(combination):
-#                option_text.append(f'{option_names[i]}: {o}')
-                goal_options[option_names[i]] = o
+        if selected_indices is None:
+            option_names = sorted(options)
+            combinations = itertools.product(
+                *(options[option_name] for option_name in option_names)
+            )
+            selected_options = (
+                dict(zip(option_names, combination))
+                for combination in combinations
+            )
+        else:
+            selected_options = (
+                _option_combination(options, index)
+                for index in combination_indices
+            )
+        for goal_options in selected_options:
             option_text = ', and '.join([
                 f'{k}: {v}' for k, v in goal_options.items()
             ])
             option_text = ' with ' + option_text if option_text else ''
-            product_goals.append({
+            goals.append({
                 'asin': asin,
                 'category': product['category'],
                 'query': product['query'],
@@ -154,9 +228,9 @@ def get_synthetic_goals(all_products, product_prices, rng=None):
                 'goal_options': goal_options,
                 'name': product['Title'],
             })
-            for att in attributes:
-                cnt_atts[att] += 1
-        goals += product_goals
+            if selected_indices is None:
+                for att in attributes:
+                    cnt_atts[att] += 1
     for goal in goals:
         goal['weight'] = sum(1. / cnt_atts[att] for att in goal['attributes']) / len(goal['attributes'])
     return goals

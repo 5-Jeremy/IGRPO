@@ -36,7 +36,7 @@ def catalog_fingerprint(config):
     digests = {key: file_digest(config[key]) for key in ("file_path", "attr_path")}
     if config["human_goals"] or config.get("validation"):
         digests["human_attr_path"] = file_digest(config["human_attr_path"])
-    key = content_key(dict(digests=digests, human_goals=config["human_goals"], num_products=config["num_products"], renderer_version=RENDERER_VERSION, validation=config.get("validation")))
+    key = content_key(dict(digests=digests, human_goals=config["human_goals"], num_products=config["num_products"], synthetic_goal_limit=config.get("synthetic_goal_limit"), renderer_version=RENDERER_VERSION, validation=config.get("validation")))
     return key, digests
 
 
@@ -46,6 +46,7 @@ class CatalogMetadata:
     product_count: int
     human_goals: bool
     num_products: int | None
+    synthetic_goal_limit: int | None
     max_choices: int
     renderer_version: str = RENDERER_VERSION
     show_attrs: bool = False
@@ -87,7 +88,7 @@ class WebshopCatalogData:
 
         key, digests = catalog_fingerprint(config)
         products, items, attributes = load_catalog_products(config["file_path"], config["attr_path"], config["num_products"], config["human_goals"], config.get("human_attr_path"), include_human_goals=bool(config.get("validation")))
-        metadata = CatalogMetadata(key, len(products), config["human_goals"], config["num_products"], max((len(v) + 1 for p in products for v in p["options"].values()), default=0), show_attrs=config["show_attrs"], renderer_version=RENDERER_VERSION)
+        metadata = CatalogMetadata(key, len(products), config["human_goals"], config["num_products"], config.get("synthetic_goal_limit"), max((len(v) + 1 for p in products for v in p["options"].values()), default=0), show_attrs=config["show_attrs"], renderer_version=RENDERER_VERSION)
         return cls(products, items, attributes, metadata, digests, config.get("validation"))
 
     def seed_view(self, seed, *, shuffle_goals=True, split="train"):
@@ -103,9 +104,9 @@ class WebshopCatalogData:
         rng = random.Random(seed)
         prices = generate_product_prices(self.all_products, rng=rng)
         if self.validation:
-            goals = get_split_goals(self.all_products, prices, self.metadata.human_goals, rng, split, self.validation, seed, shuffle_goals)
+            goals = get_split_goals(self.all_products, prices, self.metadata.human_goals, rng, split, self.validation, seed, shuffle_goals, self.metadata.synthetic_goal_limit)
         else:
-            goals = get_goals(self.all_products, prices, self.metadata.human_goals, rng=rng)
+            goals = get_goals(self.all_products, prices, self.metadata.human_goals, rng=rng, synthetic_goal_limit=self.metadata.synthetic_goal_limit)
         # SimServer explicitly re-seeds here, after generating prices and goals.
         if shuffle_goals and not self.validation:
             rng.seed(seed)
