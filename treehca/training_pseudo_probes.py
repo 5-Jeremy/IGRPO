@@ -45,8 +45,10 @@ class TrainingPseudoProbeScorer:
 
         def request(prompt, response, indices):
             key = (tuple(prompt), tuple(response), tuple(indices))
-            if not prompt or not response or len(prompt) + len(response) > self.max_model_len:
-                raise ValueError("Empty or overflowing TreeHCA pseudo probe")
+            if not prompt or not response:
+                raise ValueError("Empty TreeHCA pseudo probe")
+            if not self.request_fits(prompt, response):
+                raise ValueError(f"TreeHCA pseudo probe is overflowing: requires {len(prompt) + len(response)} tokens, exceeding max_model_len={self.max_model_len}")
             if key not in lookup:
                 lookup[key] = len(requests)
                 requests.append(key)
@@ -122,3 +124,7 @@ class TrainingPseudoProbeScorer:
             choices = tuple(ActionChoiceScore(label, action, math.exp(float(logp)), float(logp), float(pair[0] - normalizer), float(pair[1] - normalizer)) for label, action, logp, pair in zip(probe.labels, probe.actions, action_logs, logs))
             scores.append(ProductPagePseudoRolloutScores(choices))
         return scores
+
+    def request_fits(self, prompt, response) -> bool:
+        """Return whether one nonempty teacher-forcing row fits the actor context."""
+        return bool(prompt) and bool(response) and len(prompt) + len(response) <= self.max_model_len

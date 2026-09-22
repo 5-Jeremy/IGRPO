@@ -183,8 +183,13 @@ environments retain their existing zero root baseline and gain computation.
 - Identical teacher-forcing requests are deduplicated per stage. Up to
   `algorithm.treehca.webshop_probe_batch_size` unique rows (default 32) are
   submitted per call, followed by any required worker-divisibility padding.
-- Requests are left padded without truncation, with explicit attention and
-  position tensors. Context overflow and missing/misaligned scores are errors.
+- Requests are left padded with explicit attention and position tensors. When
+  a request would exceed the context limit, training rebuilds the scorer-only
+  prompt after dropping the oldest captured observation/action pair, repeating
+  until it fits. Retained entries and the current observation are never cut at
+  token boundaries; all history may be removed if necessary. If the request
+  still overflows with no history, it is an error. The policy rollout prompt
+  and standalone scorer are unchanged.
 - Training's `data.apply_chat_template_kwargs` also applies to pseudo prompts.
 
 FSDP and Megatron workers honor `treehca_probe_temperature=1.0` only when

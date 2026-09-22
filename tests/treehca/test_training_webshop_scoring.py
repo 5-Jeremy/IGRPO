@@ -14,10 +14,10 @@ from treehca.product_page_parser import ProductOptionGroup, extract_product_page
 from treehca.pseudo_rollout_product_page import ProductOptionGroupPseudoRollout
 from treehca.pseudo_rollout_product_page_grouped_choices_testbed import sample_diverse_product_goals
 from treehca.pseudo_rollout_product_page_outcomes_testbed import _DEFAULT_ATTRIBUTES, _DEFAULT_CATALOG, construct_start_episode, create_server
-from treehca.pseudo_rollout_results_page import ResultsPageAnswerProbe
+from treehca.pseudo_rollout_results_page import ResultsPageAnswerProbe, prepare_results_page_answer_probe
 from treehca.training_pseudo_probes import TrainingPseudoProbeScorer
 from treehca.training_webshop_env import TreeHCAWebshopWorker
-from treehca.training_webshop_scoring import TrainingWebshopTurnSuccessScorer, WebshopInfoGainScorer, resolve_treehca_scorer
+from treehca.training_webshop_scoring import TrainingWebshopTurnSuccessScorer, WebshopInfoGainScorer, _render_scoring_prompt, resolve_treehca_scorer
 from treehca.webshop_option_success import NativeOptionSuccessPlan, OptionCoverageGroup
 from treehca.webshop_probability_snapshot import WebshopTurnSnapshot
 from treehca.webshop_turn_success import _ProductJob
@@ -214,6 +214,65 @@ def test_training_product_probe_uses_exact_names_and_joint_answer_tokens(native_
     assert pruned[0].option_names == (group.values[0],)
     pruned_scores = TrainingPseudoProbeScorer(tokenizer, FakeActor(), max_model_len=32768).score(pruned)[0]
     assert plan.aggregate_success_mass({group.name: pruned_scores.action_probabilities}) == pytest.approx(raw[0])
+
+
+def test_product_probe_drops_oldest_history_until_it_fits(native_training):
+    episode, tokenizer = native_training
+    snapshot = payload_for(worker_for(episode), episode)["snapshot"]
+    parts = extract_product_page_contexts([snapshot.prompt])[0]
+    from treehca.product_page_parser import parse_product_page_fields
+
+    group = parse_product_page_fields(parts.current_observation, parts.admissible_actions).option_groups[0]
+    actions = tuple(f"click[{name}]" for name in group.values) + ("none",)
+    plan = NativeOptionSuccessPlan((OptionCoverageGroup(group.name, actions, (1,) + (0,) * (len(actions) - 1)),), 0, 1)
+    history = (("oldest " * 4000, "search[old]"), ("newest observation", "click[new]"))
+    snapshot = replace(snapshot, completed_steps=2, history_limit=2)
+    snapshot = _render_scoring_prompt(snapshot, history)
+
+    scorer = object.__new__(TrainingWebshopTurnSuccessScorer)
+    scorer.probe_scorer = TrainingPseudoProbeScorer(tokenizer, FakeActor(), max_model_len=32768)
+    scorer.prune_unsuccessful_choices = False
+    job = _ProductJob(snapshot, plan)
+    one_history = _render_scoring_prompt(snapshot, history[1:])
+    one_history_probes = scorer._prepare_product_probes(job, one_history)
+    limit = max(len(answer.prompt_token_ids) + len(answer.response_token_ids) for probe, _ in one_history_probes for answer in probe.answer_probes)
+    full_probes = scorer._prepare_product_probes(job, snapshot)
+    assert max(len(answer.prompt_token_ids) + len(answer.response_token_ids) for probe, _ in full_probes for answer in probe.answer_probes) > limit
+
+    scorer.probe_scorer.max_model_len = limit
+    probes, owners = [], []
+    scorer._append_product_probes([job], probes, owners)
+    assert job.snapshot.history == history[1:]
+    assert "oldest" not in job.snapshot.prompt
+    assert "newest observation" in job.snapshot.prompt
+    scorer.probe_scorer.score(probes)
+
+
+def test_results_probe_drops_oldest_history_until_it_fits(native_training):
+    episode, tokenizer = native_training
+    results_episode = episode.clone()
+    results_episode.advance("click[< prev]")
+    snapshot = payload_for(worker_for(results_episode), results_episode, "item_page")["snapshot"]
+    history = (("oldest " * 4000, "search[old]"), ("newest observation", "click[new]"))
+    snapshot = replace(snapshot, completed_steps=2, history_limit=2)
+    snapshot = _render_scoring_prompt(snapshot, history)
+    one_history = _render_scoring_prompt(snapshot, history[1:])
+
+    def largest_request(candidate):
+        candidate_parts = extract_product_page_contexts([candidate.prompt])[0]
+        visible = {asin.lower() for asin in candidate.visible_asins}
+        actions = [action for action in candidate_parts.admissible_actions if action.startswith("click[") and action[6:-1].lower() in visible]
+        probes = [prepare_results_page_answer_probe(candidate.prompt, action, tokenizer) for action in actions]
+        return max(len(probe.prompt_token_ids) + len(probe.response_token_ids) for probe in probes)
+
+    limit = largest_request(one_history)
+    assert largest_request(snapshot) > limit
+    scorer = object.__new__(TrainingWebshopTurnSuccessScorer)
+    scorer.probe_scorer = TrainingPseudoProbeScorer(tokenizer, FakeActor(), max_model_len=limit)
+    fitted = scorer._fit_results_snapshot(snapshot)
+    assert fitted.history == history[1:]
+    assert "oldest" not in fitted.prompt
+    assert "newest observation" in fitted.prompt
 
 
 def test_successful_actions_include_cross_group_completions():

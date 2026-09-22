@@ -97,6 +97,9 @@ class WebshopTurnSuccessScorer:
         observation = extract_product_page_contexts([snapshot.prompt])[0].current_observation
         return snapshot.search_terms, snapshot.results_page, snapshot.visible_asins, observation
 
+    def _prepare_search_job(self, job: _SearchJob) -> None:
+        """Allow scorer specializations to prepare uncached search probes."""
+
     def score(self, snapshots: Sequence[WebshopTurnSnapshot], *, policy_version: Hashable) -> list[TurnSuccessProbability]:
         hash(policy_version)
         self.last_cache_reuses = 0
@@ -162,6 +165,7 @@ class WebshopTurnSuccessScorer:
         probes: list[PseudoProbe] = []
         owners = []
         for job in search_jobs.values():
+            self._prepare_search_job(job)
             prompt_ids = None
             for asin, action in job.actions.items():
                 probe = prepare_results_page_answer_probe(job.snapshot.prompt, action, self.probe_scorer.tokenizer, prompt_token_ids=prompt_ids)

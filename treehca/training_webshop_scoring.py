@@ -6,6 +6,7 @@ import math
 import sys
 import time
 from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,10 +15,45 @@ import torch
 
 from treehca.product_page_parser import extract_product_page_contexts, parse_product_page_fields
 from treehca.pseudo_rollout_product_page import GROUP_NONE_ACTION, _build_product_page_prompt
-from treehca.pseudo_rollout_results_page import prepare_response_suffix_probe
+from treehca.pseudo_rollout_results_page import prepare_response_suffix_probe, prepare_results_page_answer_probe
 from treehca.training_pseudo_probes import TrainingProductOptionProbe, TrainingPseudoProbeScorer
 from treehca.webshop_probability_snapshot import WebshopSnapshotSource
 from treehca.webshop_turn_success import WebshopTurnSuccessScorer
+
+
+def _render_scoring_prompt(snapshot, history, parts=None):
+    """Render a scorer-only prompt with a suffix of the captured history."""
+    from agent_system.environments.prompts.webshop import WEBSHOP_TEMPLATE, WEBSHOP_TEMPLATE_NO_HIS
+
+    parts = parts or extract_product_page_contexts([snapshot.prompt])[0]
+    fields = dict(
+        task_description=snapshot.shopping_task,
+        current_observation=parts.current_observation,
+        available_actions="\n".join(f"'{action}'," for action in parts.admissible_actions),
+    )
+    if history:
+        start = snapshot.completed_steps - len(history) + 1
+        action_history = "\n".join(f"[Observation {step}: '{observation}', Action {step}: '{action}']" for step, (observation, action) in enumerate(history, start=start))
+        prompt = WEBSHOP_TEMPLATE.format(
+            **fields,
+            step_count=snapshot.completed_steps,
+            history_length=len(history),
+            action_history=action_history,
+            current_step=snapshot.completed_steps + 1,
+        )
+    else:
+        prompt = WEBSHOP_TEMPLATE_NO_HIS.format(**fields)
+    return replace(snapshot, prompt=prompt, history=tuple(history))
+
+
+def _history_trim_candidates(snapshot):
+    """Yield the original snapshot, then suffixes formed by dropping oldest history."""
+    yield snapshot
+    parts = extract_product_page_contexts([snapshot.prompt])[0]
+    if parts.history_block is None:
+        return
+    for removed in range(1, len(snapshot.history) + 1):
+        yield _render_scoring_prompt(snapshot, snapshot.history[removed:], parts)
 
 
 class _TrainingTokenizer:
@@ -55,44 +91,88 @@ class TrainingWebshopTurnSuccessScorer(WebshopTurnSuccessScorer):
             raise ValueError("prune_unsuccessful_choices must be a boolean")
         self.prune_unsuccessful_choices = prune_unsuccessful_choices
 
+    def _request_fits(self, prompt, response):
+        check = getattr(self.probe_scorer, "request_fits", None)
+        if check is not None:
+            return check(prompt, response)
+        limit = getattr(self.probe_scorer, "max_model_len", None)
+        return limit is None or len(prompt) + len(response) <= limit
+
+    def _prepare_search_job(self, job):
+        # Hypothetical product pages inherit the fitted history suffix.
+        job.snapshot = self._fit_results_snapshot(job.snapshot, job.actions.values())
+
+    def _fit_results_snapshot(self, snapshot, actions=None):
+        tokenizer = self.probe_scorer.tokenizer
+        if actions is None:
+            visible = {asin.lower() for asin in snapshot.visible_asins}
+            parts = extract_product_page_contexts([snapshot.prompt])[0]
+            actions = [action for action in parts.admissible_actions if action.startswith("click[") and action[6:-1].lower() in visible]
+        actions = tuple(actions)
+        for candidate in _history_trim_candidates(snapshot):
+            prompt_ids = None
+            fits = True
+            for action in actions:
+                probe = prepare_results_page_answer_probe(candidate.prompt, action, tokenizer, prompt_token_ids=prompt_ids)
+                prompt_ids = probe.prompt_token_ids
+                if not self._request_fits(probe.prompt_token_ids, probe.response_token_ids):
+                    fits = False
+                    break
+            if fits:
+                return candidate
+        raise ValueError(f"TreeHCA results-page pseudo probe exceeds max_model_len={self.probe_scorer.max_model_len} after removing all past observations")
+
     def add_catalog_payload(self, payload):
         self.source.server.product_item_dict.update(payload["products"])
         self.source.server.product_prices.update(payload["prices"])
 
     def _append_product_probes(self, jobs, probes, owners):
-        tokenizer = self.probe_scorer.tokenizer
         for job in jobs:
             if job.probability is not None:
                 continue
-            parts = extract_product_page_contexts([job.snapshot.prompt])[0]
-            fields = parse_product_page_fields(parts.current_observation, parts.admissible_actions)
-            groups = {group.name: group for group in fields.option_groups}
-            useful = job.plan.successful_actions() if self.prune_unsuccessful_choices else {group.name: group.actions for group in job.plan.groups}
-            for planned in job.plan.groups:
-                group = groups.get(planned.name)
-                if group is None or tuple(f"click[{value}]" for value in group.values) + (GROUP_NONE_ACTION,) != planned.actions:
-                    raise ValueError("Snapshot product options differ from the native catalog")
-                # The synthetic none response represents leaving this group untouched.
-                names = (*group.values, GROUP_NONE_ACTION)
-                options = "\n".join((*group.values, "none (do not select any option in this group)"))
-                instructions = (
-                    f'Now choose one option for the "{group.name}" group that best satisfies the user\'s needs. '
-                    'The "none" choice means never clicking an option in this group. '
-                    f'Think about what is the best choice inside <think>...</think> before giving your answer. '
-                )
-                prompt = _build_product_page_prompt(parts, options, instructions, selection_description=f"Your available options for {group.name} are:")
-                answers = []
-                prompt_ids = None
-                scored_pairs = [(action, name) for action, name in zip(planned.actions, names) if action in useful[planned.name]]
-                if not scored_pairs:
-                    raise ValueError(f"No full-reward choice is available for option group {planned.name!r}")
-                response_prefix = f"<think> The best choice for the {group.name} group is "
-                for _, name in scored_pairs:
-                    answer = prepare_response_suffix_probe(prompt, response_prefix, name, tokenizer, prompt_token_ids=prompt_ids)
-                    prompt_ids = answer.prompt_token_ids
-                    answers.append(answer)
-                probes.append(TrainingProductOptionProbe(tuple(action for action, _ in scored_pairs), tuple(name for _, name in scored_pairs), tuple(answers)))
-                owners.append((job, group.name))
+            for candidate in _history_trim_candidates(job.snapshot):
+                prepared = self._prepare_product_probes(job, candidate)
+                if all(self._request_fits(answer.prompt_token_ids, answer.response_token_ids) for probe, _ in prepared for answer in probe.answer_probes):
+                    job.snapshot = candidate
+                    for probe, group_name in prepared:
+                        probes.append(probe)
+                        owners.append((job, group_name))
+                    break
+            else:
+                raise ValueError(f"TreeHCA product-page pseudo probe exceeds max_model_len={self.probe_scorer.max_model_len} after removing all past observations")
+
+    def _prepare_product_probes(self, job, snapshot):
+        tokenizer = self.probe_scorer.tokenizer
+        parts = extract_product_page_contexts([snapshot.prompt])[0]
+        fields = parse_product_page_fields(parts.current_observation, parts.admissible_actions)
+        groups = {group.name: group for group in fields.option_groups}
+        useful = job.plan.successful_actions() if self.prune_unsuccessful_choices else {group.name: group.actions for group in job.plan.groups}
+        prepared = []
+        for planned in job.plan.groups:
+            group = groups.get(planned.name)
+            if group is None or tuple(f"click[{value}]" for value in group.values) + (GROUP_NONE_ACTION,) != planned.actions:
+                raise ValueError("Snapshot product options differ from the native catalog")
+            # The synthetic none response represents leaving this group untouched.
+            names = (*group.values, GROUP_NONE_ACTION)
+            options = "\n".join((*group.values, "none (do not select any option in this group)"))
+            instructions = (
+                f'Now choose one option for the "{group.name}" group that best satisfies the user\'s needs. '
+                'The "none" choice means never clicking an option in this group. '
+                f'Think about what is the best choice inside <think>...</think> before giving your answer. '
+            )
+            prompt = _build_product_page_prompt(parts, options, instructions, selection_description=f"Your available options for {group.name} are:")
+            answers = []
+            prompt_ids = None
+            scored_pairs = [(action, name) for action, name in zip(planned.actions, names) if action in useful[planned.name]]
+            if not scored_pairs:
+                raise ValueError(f"No full-reward choice is available for option group {planned.name!r}")
+            response_prefix = f"<think> The best choice for the {group.name} group is "
+            for _, name in scored_pairs:
+                answer = prepare_response_suffix_probe(prompt, response_prefix, name, tokenizer, prompt_token_ids=prompt_ids)
+                prompt_ids = answer.prompt_token_ids
+                answers.append(answer)
+            prepared.append((TrainingProductOptionProbe(tuple(action for action, _ in scored_pairs), tuple(name for _, name in scored_pairs), tuple(answers)), group.name))
+        return prepared
 
     def _finish_products(self, jobs):
         for job in jobs:
