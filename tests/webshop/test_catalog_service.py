@@ -492,3 +492,41 @@ def test_training_factory_uses_independent_validation_config(monkeypatch, backen
     if backend == "centralized":
         assert train["env_kwargs"]["catalog_service"] is val["env_kwargs"]["catalog_service"]
         assert rpc_calls[0] == ("get_seed_view", dict(seed=233, split="validation"))
+
+
+@pytest.mark.parametrize("backend", ["legacy", "centralized"])
+def test_training_factory_can_restore_legacy_validation(monkeypatch, backend):
+    from types import SimpleNamespace
+
+    from omegaconf import OmegaConf
+
+    from agent_system.environments import env_manager
+    from agent_system.environments.env_package import webshop
+    from agent_system.environments.env_package.webshop import catalog_service
+
+    calls, rpc_calls = [], []
+    monkeypatch.setattr(webshop, "build_webshop_envs", lambda **kwargs: calls.append(kwargs) or SimpleNamespace())
+    monkeypatch.setattr(env_manager, "WebshopEnvironmentManager", lambda env, *args: env)
+    monkeypatch.setattr(catalog_service, "start_catalog_service", lambda *args: object())
+
+    class Client:
+        def __init__(self, *args):
+            pass
+
+        def call(self, operation, **kwargs):
+            rpc_calls.append((operation, kwargs))
+
+    monkeypatch.setattr(catalog_service, "CatalogClient", Client)
+    config = OmegaConf.create(
+        dict(
+            env=dict(env_name="webshop", seed=91, rollout=dict(n=2), resources_per_worker={}, webshop=dict(use_small=True, backend=backend, human_goals=False, validation=dict(mode="legacy"), catalog_service=dict(startup_smoke_test=False))),
+            data=dict(train_batch_size=2, val_batch_size=2),
+            algorithm=dict(adv_estimator="grpo"),
+        )
+    )
+    env_manager.make_envs(config)
+    train, val = calls
+    assert train["seed"] == 91 and val["seed"] == 1091
+    assert "validation" not in train["env_kwargs"]
+    assert "goal_split" not in val["env_kwargs"]
+    assert not any(operation == "get_seed_view" and kwargs.get("split") == "validation" for operation, kwargs in rpc_calls)

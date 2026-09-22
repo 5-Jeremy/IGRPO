@@ -959,10 +959,18 @@ in `ppo_trainer.yaml` are:
 env:
   webshop:
     validation:
+      mode: fixed_human
       seed: 233
       shuffle_seed: 233
       count: 500
 ```
+
+Set `env.webshop.validation.mode=legacy` to restore the original validation
+behavior. It uses the configured training seed plus 1000, constructs the same goal
+kind as training (`env.webshop.human_goals`), and validates on positions 0--499 of
+each worker's seeded goal ordering. This mode works with the 1,000-product catalog
+and does not load or construct human validation goals. It is useful for small
+catalog smoke runs, but it is not the fixed official test split.
 
 `validation.seed` fixes prices and goal price limits. `validation.shuffle_seed`
 fixes membership and ordering independently of the training seed. Reproducing the

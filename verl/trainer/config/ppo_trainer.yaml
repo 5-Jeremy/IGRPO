@@ -344,8 +344,10 @@ env:
   webshop:
     backend: null # null: legacy for small catalog, centralized for full catalog
     use_small: True
-    human_goals: False # training goals only; validation always uses human goals
+    human_goals: False
     validation:
+      # fixed_human: official seed-233 human split; legacy: original seeded first-500 split.
+      mode: fixed_human
       seed: 233 # fixed prices and human-goal price limits
       shuffle_seed: 233 # official ordering (requires the full catalog)
       count: 500

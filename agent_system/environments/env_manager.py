@@ -692,16 +692,21 @@ def make_envs(config):
                     'file_path': file_path,
                     'attr_path': attr_path
                     }
-        validation = dict(config.env.webshop.get('validation', {}))
-        validation = {"seed": validation.get("seed", 233),
-                      "shuffle_seed": validation.get("shuffle_seed", 233),
-                      "count": validation.get("count", 500)}
-        if any(type(value) is not int for value in validation.values()) or validation["count"] < 1:
-            raise ValueError("WebShop validation seeds and count must be integers, with count positive")
-        if config.data.val_batch_size > validation["count"]:
-            raise ValueError("WebShop val_batch_size must not exceed validation.count (sampling is without replacement)")
-        env_kwargs["validation"] = validation
-        env_kwargs["goal_split"] = "train"
+        validation_config = dict(config.env.webshop.get('validation', {}))
+        validation_mode = validation_config.get("mode", "fixed_human")
+        if validation_mode not in {"fixed_human", "legacy"}:
+            raise ValueError("WebShop validation.mode must be 'fixed_human' or 'legacy'")
+        validation = None
+        if validation_mode == "fixed_human":
+            validation = {"seed": validation_config.get("seed", 233),
+                          "shuffle_seed": validation_config.get("shuffle_seed", 233),
+                          "count": validation_config.get("count", 500)}
+            if any(type(value) is not int for value in validation.values()) or validation["count"] < 1:
+                raise ValueError("WebShop validation seeds and count must be integers, with count positive")
+            if config.data.val_batch_size > validation["count"]:
+                raise ValueError("WebShop val_batch_size must not exceed validation.count (sampling is without replacement)")
+            env_kwargs["validation"] = validation
+            env_kwargs["goal_split"] = "train"
         human_attr_path = config.env.webshop.get('catalog_service', {}).get('human_attr_path')
         if human_attr_path:
             env_kwargs["human_attr_path"] = human_attr_path
@@ -728,7 +733,8 @@ def make_envs(config):
             # Validate a seed view and deterministic read before creating rollout actors.
             try:
                 client = CatalogClient(catalog_service, settings.get('startup_timeout_s', 1800))
-                client.call('get_seed_view', seed=validation['seed'], split='validation')
+                if validation is not None:
+                    client.call('get_seed_view', seed=validation['seed'], split='validation')
                 ref = client.call('get_seed_view', seed=int(config.env.seed))
                 for offset in range(1, min(config.data.train_batch_size, settings.get('seed_view_cache_size', 64))):
                     client.call('get_seed_view', seed=int(config.env.seed) + offset)
@@ -744,7 +750,9 @@ def make_envs(config):
         _envs = None
         try:
             _envs = build_webshop_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker, **worker_options)
-            _val_envs = build_webshop_envs(seed=validation["seed"], env_num=config.data.val_batch_size, group_n=1, is_train=False, env_kwargs={**env_kwargs, "goal_split": "validation"}, resources_per_worker=resources_per_worker)
+            val_seed = validation["seed"] if validation is not None else config.env.seed + 1000
+            val_kwargs = {**env_kwargs, "goal_split": "validation"} if validation is not None else env_kwargs
+            _val_envs = build_webshop_envs(seed=val_seed, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_kwargs=val_kwargs, resources_per_worker=resources_per_worker)
             # Trainer closes validation first, then the owner and its catalog.
             _envs._owns_catalog_service = owns_catalog_service
         except BaseException:
