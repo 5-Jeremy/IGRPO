@@ -266,7 +266,9 @@ algorithm:
     webshop_prune_unsuccessful_choices: true # score only options in a full-reward purchase combination
     credit: snis # snis: SNIS backup over children. q_hindsight: GRPO advantage + Q * (1 - 1/hindsight ratio)
     max_inv_ratio: 2.0 # q_hindsight only: clip 1/h, h = p_gt(node)/p_gt(parent). At 2.0 the aux term spans [-Q, +Q]
-    q_weight: 0.3 # q_hindsight only: blend share of the aux term, A = (1 - q_weight) * A_grpo + q_weight * A_aux
+    grpo_weight: 0.7 # q_hindsight only: coefficient on the GRPO term, A = grpo_weight * A_grpo + q_weight * A_aux
+    q_weight: 0.3 # q_hindsight only: coefficient on the aux term. Independent of grpo_weight, need not sum to 1
+    aux_mode: hindsight # q_hindsight only: hindsight for Q * (1 - 1/h), td for Q(node) - Q(parent), which is exactly zero-mean per sibling set
     prob_floor: 1.0e-6 # clamp p_gt before inverting it
     weight_temp: 1.0 # w_c = (1 / p_gt(c)) ** weight_temp
     max_weight_ratio: -1.0 # truncate w_c at this multiple of the mean sibling weight; -1 disables

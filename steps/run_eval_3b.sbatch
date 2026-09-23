@@ -10,12 +10,17 @@
 #SBATCH --time=1-00:00:00
 #SBATCH --output=/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO/runs/ICLR-eval/slurm-%j.out
 
-# Evaluate the step-200 3B checkpoints on the full multi-hop test sets
-# (hotpotqa, 2wikimultihopqa, bamboogle, musique -- 22,523 questions).
+# Evaluate the step-200 3B checkpoints on the whole Search-R1 test split: all
+# 51,713 questions across both the single-hop sets (nq, triviaqa, popqa) and the
+# multi-hop ones (hotpotqa, 2wikimultihopqa, musique, bamboogle). _validate keys
+# its metrics on data_source, so one pass gives the per-dataset breakdown.
 #
-# All four checkpoints are scored in one job against a single retriever. Loading
-# the 64 GB faiss index costs about half an hour, so paying that once instead of
-# four times is most of the reason this is a loop rather than four jobs.
+# Every checkpoint is scored in one job against a single retriever. Loading the
+# 64 GB faiss index costs about half an hour, so paying that once instead of
+# once per checkpoint is most of the reason this is a loop rather than N jobs.
+#
+# Budget about 3 h per checkpoint for the full split; the multi-hop-only subset
+# (eval_multihop_full.parquet, 22,523 rows) took ~77 min.
 #
 # GPU layout follows the 3B training runs exactly: retriever on GPU 4, actor on
 # GPUs 0-3. That is not a preference -- the checkpoints are FSDP shards written
@@ -23,8 +28,9 @@
 #
 # Submit with:
 #   sbatch steps/run_eval_3b.sbatch
-# Override the set of runs or the step with:
-#   sbatch --export=ALL,RUNS="igrpo-3B treehca-3B",STEP=150 steps/run_eval_3b.sbatch
+# Override the runs, the step, or the test set with:
+#   sbatch --export=ALL,RUNS="igrpo-allval-3B",STEP=150 steps/run_eval_3b.sbatch
+#   sbatch --export=ALL,EVAL_DATA=$DATA/searchR1_processed_direct/eval_multihop_full.parquet steps/run_eval_3b.sbatch
 
 set -eo pipefail
 
@@ -32,11 +38,14 @@ REPO=/scratch/user/debajoym98_tamu.edu/IGRPO
 DATA=/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO
 CONDA_BASE=/sw/eb/sw/Miniforge3/25.3.0-3
 
-RUNS=${RUNS:-"igrpo-3B igpo-3B gigpo-3B treehca-3B"}
+RUNS=${RUNS:-"igrpo-allval-3B igpo-allval-3B gigpo-allval-3B"}
 STEP=${STEP:-200}
 TRAIN_PROJECT=${TRAIN_PROJECT:-ICLR}
 export PROJECT_NAME=${PROJECT_NAME:-ICLR-eval}
 export DATA
+
+# The whole test split, single-hop and multi-hop together.
+export EVAL_DATA=${EVAL_DATA:-$DATA/searchR1_processed_direct/test.parquet}
 
 OUT_DIR=$DATA/runs/$PROJECT_NAME
 mkdir -p "$OUT_DIR"
@@ -57,6 +66,7 @@ export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
 
 echo "=== eval step $STEP | host $(hostname) | job ${SLURM_JOB_ID} | $(date) ==="
 echo "runs: $RUNS"
+echo "eval_data=$EVAL_DATA"
 echo "port=$SEARCH_PORT out=$OUT_DIR"
 
 # Fail before the retriever load rather than an hour into the job.

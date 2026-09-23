@@ -335,7 +335,9 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         elif treehca_credit == "q_hindsight":
             advantages, returns, treehca_metrics = core_treehca.compute_treehca_q_outcome_advantage(
                 max_inv_ratio=kwargs.get("treehca_max_inv_ratio", 2.0),
+                grpo_weight=kwargs.get("treehca_grpo_weight", 0.7),
                 q_weight=kwargs.get("treehca_q_weight", 0.3),
+                aux_mode=kwargs.get("treehca_aux_mode", "hindsight"),
                 **tree_kwargs,
             )
         else:
@@ -787,7 +789,7 @@ class RayPPOTrainer:
         sample_outputs = []
         sample_scores = []
 
-        for test_data in self.val_dataloader:
+        for validation_batch_index, test_data in enumerate(self.val_dataloader):
             test_batch = DataProto.from_single_dict(test_data)
 
             # repeat test batch
@@ -844,6 +846,22 @@ class RayPPOTrainer:
             print('validation generation end')
             del test_batch
             test_batch = test_output_gen_batch
+            validation_data_dir = self.config.trainer.get("validation_data_dir")
+            if validation_data_dir and self.config.env.env_name == "search":
+                from agent_system.multi_turn_rollout.trajectory_export import export_search_trajectories
+
+                export_search_trajectories(
+                    test_batch,
+                    self.tokenizer,
+                    os.path.join(validation_data_dir, f"step_{self.global_steps}_batch_{validation_batch_index:05d}.jsonl"),
+                    {
+                        "model": self.config.trainer.experiment_name,
+                        "checkpoint": self.config.trainer.resume_from_path,
+                        "global_step": self.global_steps,
+                        "max_steps": self.config.env.max_steps,
+                        "split": "evaluation",
+                    },
+                )
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
@@ -1374,7 +1392,9 @@ class RayPPOTrainer:
                             treehca_norm_adv_by_std=self.config.algorithm.treehca.norm_adv_by_std,
                             treehca_credit=self.config.algorithm.treehca.credit,
                             treehca_max_inv_ratio=self.config.algorithm.treehca.max_inv_ratio,
+                            treehca_grpo_weight=self.config.algorithm.treehca.grpo_weight,
                             treehca_q_weight=self.config.algorithm.treehca.q_weight,
+                            treehca_aux_mode=self.config.algorithm.treehca.aux_mode,
                         )
                         metrics.update(batch.meta_info.pop("treehca_metrics", {}))
                         self.debug_batch_instance(batch, "after_adv")

@@ -3,18 +3,18 @@ set -x
 ENGINE=${1:-vllm}
 
 train_data_size=256
-val_data_size=1024
+val_data_size=${VAL_DATA_SIZE:-1024}
 group_size=5
 
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
-export MASTER_PORT=29511
+export MASTER_PORT=${MASTER_PORT:-29511}
 
 DATA=${DATA:-/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO}
 
-TRAIN_DATA="$DATA/searchR1_processed_direct/train.parquet"
+TRAIN_DATA=${TRAIN_DATA:-"$DATA/searchR1_processed_direct/train.parquet"}
 # 1024 HotpotQA dev examples, not the full 51,713-row test split; see
 # examples/data_preprocess/make_val_subset.py
-VAL_DATA="$DATA/searchR1_processed_direct/val_subset.parquet"
+VAL_DATA=${VAL_DATA:-"$DATA/searchR1_processed_direct/val_subset.parquet"}
 
 MODEL_PATH="$DATA/Base_models/Qwen2.5-3B-Instruct"
 PROJECT_NAME=${PROJECT_NAME:-ICLR}
@@ -27,6 +27,13 @@ DEBUG_DIR=${DEBUG_DIR:-$RUN_DIR/debug_batches}
 # log p_gt(parent), which the softmax can actually separate -- on the saved debug
 # batches info_val prunes at rank 0.49 (random) and log_ratio at 0.37.
 EXPAND_SCORE=${EXPAND_SCORE:-info_val}
+# snis: SNIS backup over children. q_hindsight: grpo_weight * A_grpo + q_weight of
+# Q * (1 - 1/h), h = p_gt(node) / p_gt(parent).
+TREEHCA_CREDIT=${TREEHCA_CREDIT:-snis}
+GRPO_WEIGHT=${GRPO_WEIGHT:-0.7}
+Q_WEIGHT=${Q_WEIGHT:-0.3}
+# hindsight: Q * (1 - 1/h). td: Q(node) - Q(parent), exactly zero-mean per sibling set.
+AUX_MODE=${AUX_MODE:-hindsight}
 
 # TreeHCA reuses the IGRPO branching scheme (algorithm.igrpo.*) and replaces only
 # the credit assignment (algorithm.treehca.*). reward_mode must stay avg/max so the
@@ -40,6 +47,11 @@ python3 -m verl.trainer.main_ppo \
     algorithm.igrpo.reduce_expand_num_per_steps_num=-1 \
     algorithm.igrpo.reward_mode='max' \
     algorithm.igrpo.expand_score=$EXPAND_SCORE \
+    algorithm.treehca.credit=$TREEHCA_CREDIT \
+    algorithm.treehca.max_inv_ratio=2.0 \
+    algorithm.treehca.grpo_weight=$GRPO_WEIGHT \
+    algorithm.treehca.q_weight=$Q_WEIGHT \
+    algorithm.treehca.aux_mode=$AUX_MODE \
     algorithm.treehca.prob_floor=1e-6 \
     algorithm.treehca.weight_temp=1.0 \
     algorithm.treehca.max_weight_ratio=-1.0 \
@@ -101,8 +113,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.debug_freq=10 \
     trainer.debug_dir=$DEBUG_DIR \
     trainer.total_epochs=1 \
-    trainer.max_actor_ckpt_to_keep=3 \
-    trainer.max_critic_ckpt_to_keep=3 \
+    trainer.max_actor_ckpt_to_keep=${CKPT_KEEP:-3} \
+    trainer.max_critic_ckpt_to_keep=${CKPT_KEEP:-3} \
     trainer.resume_mode=auto \
     trainer.val_before_train=False \
     hydra.run.dir='./output/${now:%Y-%m-%d}/${now:%H-%M-%S}' \

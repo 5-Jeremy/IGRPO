@@ -10,7 +10,7 @@ set -x
 ENGINE=${1:-vllm}
 
 train_data_size=256
-val_data_size=1024
+val_data_size=${VAL_DATA_SIZE:-1024}
 group_size=5
 
 # GiGPO config
@@ -19,14 +19,14 @@ enable_similarity=True # enable similarity-based GiGPO
 similarity_thresh=0.9 # similarity threshold for GiGPO
 
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
-export MASTER_PORT=29512
+export MASTER_PORT=${MASTER_PORT:-29512}
 
 DATA=${DATA:-/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO}
 
-TRAIN_DATA="$DATA/searchR1_processed_direct/train.parquet"
+TRAIN_DATA=${TRAIN_DATA:-"$DATA/searchR1_processed_direct/train.parquet"}
 # 1024 HotpotQA dev examples, not the full 51,713-row test split; see
 # examples/data_preprocess/make_val_subset.py
-VAL_DATA="$DATA/searchR1_processed_direct/val_subset.parquet"
+VAL_DATA=${VAL_DATA:-"$DATA/searchR1_processed_direct/val_subset.parquet"}
 
 MODEL_PATH="$DATA/Base_models/Qwen2.5-3B-Instruct"
 PROJECT_NAME=${PROJECT_NAME:-ICLR}

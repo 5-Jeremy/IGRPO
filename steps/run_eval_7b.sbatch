@@ -10,8 +10,9 @@
 #SBATCH --time=1-00:00:00
 #SBATCH --output=/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO/runs/ICLR-eval/slurm-%j.out
 
-# Evaluate the step-200 7B checkpoints on the full multi-hop test sets
-# (hotpotqa, 2wikimultihopqa, bamboogle, musique -- 22,523 questions).
+# Evaluate the step-200 7B checkpoints on the whole Search-R1 test split: all
+# 51,713 questions across the single-hop sets (nq, triviaqa, popqa) and the
+# multi-hop ones (hotpotqa, 2wikimultihopqa, musique, bamboogle).
 #
 # Same idea as run_eval_3b.sbatch, but with the 7B GPU layout: the actor wants
 # all 8 cards, so the retriever cannot have one to itself. faiss shards the
@@ -24,8 +25,9 @@
 #
 # Submit with:
 #   sbatch steps/run_eval_7b.sbatch
-# Override the set of runs or the step with:
-#   sbatch --export=ALL,RUNS="igrpo-7B",STEP=150 steps/run_eval_7b.sbatch
+# Override the runs, the step, or the test set with:
+#   sbatch --export=ALL,RUNS="igrpo-allval-7B",STEP=150 steps/run_eval_7b.sbatch
+#   sbatch --export=ALL,EVAL_DATA=$DATA/searchR1_processed_direct/eval_multihop_full.parquet steps/run_eval_7b.sbatch
 
 set -eo pipefail
 
@@ -33,11 +35,14 @@ REPO=/scratch/user/debajoym98_tamu.edu/IGRPO
 DATA=/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO
 CONDA_BASE=/sw/eb/sw/Miniforge3/25.3.0-3
 
-RUNS=${RUNS:-"igrpo-7B igpo-7B"}
+RUNS=${RUNS:-"igrpo-allval-7B igpo-allval-7B gigpo-allval-7B"}
 STEP=${STEP:-200}
 TRAIN_PROJECT=${TRAIN_PROJECT:-ICLR}
 export PROJECT_NAME=${PROJECT_NAME:-ICLR-eval}
 export DATA
+
+# The whole test split, single-hop and multi-hop together.
+export EVAL_DATA=${EVAL_DATA:-$DATA/searchR1_processed_direct/test.parquet}
 
 # 7B weights, not 3B. Only the config and tokenizer come from here; the
 # checkpoint overwrites the parameters.
@@ -69,6 +74,7 @@ export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
 
 echo "=== eval step $STEP | host $(hostname) | job ${SLURM_JOB_ID} | $(date) ==="
 echo "runs: $RUNS"
+echo "eval_data=$EVAL_DATA"
 echo "port=$SEARCH_PORT out=$OUT_DIR"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 
@@ -152,6 +158,9 @@ failed=""
 for run in $RUNS; do
     export CKPT_PATH="$DATA/runs/$TRAIN_PROJECT/$run/checkpoints/global_step_${STEP}"
     export EXPERIMENT_NAME="${run}-eval${STEP}"
+    if [ -n "${TRAJECTORY_AUDIT_ROOT:-}" ]; then
+        export VALIDATION_DATA_DIR="$TRAJECTORY_AUDIT_ROOT/$EXPERIMENT_NAME"
+    fi
     # A fresh port per run; a previous Ray head can leave the old one in TIME_WAIT.
     export MASTER_PORT=$((port++))
 
