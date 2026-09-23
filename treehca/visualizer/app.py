@@ -222,7 +222,7 @@ def create_app(log_dir: Path):
             legend = f"{metric}: {limits[0]:.6g} → {limits[1]:.6g} · darker = higher; gray = missing/nonfinite" if limits else f"{metric}: no finite values"
             legend += " · first record per node"
         else:
-            legend = [html.Span([html.I(className=f"legend-swatch {kind}-swatch"), label]) for kind, label in [("root", "Synthetic root"), ("internal", "Internal"), ("leaf", "Leaf")]]
+            legend = [html.Span([html.I(className=f"legend-swatch {kind}-swatch"), label]) for kind, label in [("root", "Synthetic root"), ("internal", "Internal"), ("leaf", "Leaf")] if kind != "root" or (tree and "root" in tree.nodes)]
         return elements, {"name": "preset", "fit": True, "padding": 36}, legend
 
     @app.callback(Output("selection", "data"), Input("view", "data"), Input("graph", "tapNodeData"))
@@ -231,7 +231,8 @@ def create_app(log_dir: Path):
         if tree is None:
             return None
         uid = tapped.get("id") if ctx.triggered_id == "graph" and tapped else "root"
-        node = tree.nodes.get(uid, tree.nodes["root"])
+        default = next(node for node in tree.nodes.values() if node.parent is None)
+        node = tree.nodes.get(uid, default)
         return {**view, "node": node.uid}
 
     @app.callback(

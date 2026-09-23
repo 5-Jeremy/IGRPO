@@ -50,9 +50,12 @@ class WebshopWorker:
 
     def step(self, action):
         """Execute a step in the environment"""
+        session = self.env.unwrapped.session
         obs, reward, done, info = self.env.step(action)
         info = dict(info or {})  # make a *copy* so we can mutate safely
         info.setdefault('available_actions', self.env.get_available_actions())
+        info['webshop_session_id'] = session
+        info['webshop_task_id'] = getattr(self, '_rollout_task_id', None)
         info['task_score'] = reward
         info.setdefault('page_type', self.page_type())
 
@@ -68,6 +71,7 @@ class WebshopWorker:
     
     def reset(self, idx):
         """Reset the environment with given session index"""
+        self._rollout_task_id = idx
         obs, info = self.env.reset(session=idx)
         info = dict(info or {})
         info.setdefault('available_actions', self.env.get_available_actions())

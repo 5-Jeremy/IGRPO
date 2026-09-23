@@ -436,6 +436,9 @@ class TrajectoryCollector:
             text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
             batch.non_tensor_batch['text_actions'] = text_actions
 
+            if self.config.algorithm.adv_estimator == AdvantageEstimator.GiGPO:
+                batch.non_tensor_batch["page_type"] = np.asarray([info.get("page_type") for info in infos], dtype=object)
+
             next_obs, rewards, dones, infos = envs.step(text_actions)
 
             if len(rewards.shape) == 2:
@@ -443,6 +446,15 @@ class TrajectoryCollector:
             if len(dones.shape) == 2:
                 # dones is numpy, delete a dimension
                 dones = dones.squeeze(1)
+
+            if self.config.algorithm.adv_estimator == AdvantageEstimator.GiGPO:
+                from treehca.rollout_records import capture_step_logging
+
+                is_last_step = _step == self.config.env.max_steps - 1
+                batch.non_tensor_batch.update(capture_step_logging(
+                    next_obs=next_obs, infos=infos, dones=dones, is_last_step=is_last_step,
+                ))
+                batch.non_tensor_batch["is_terminal"] = np.asarray(dones, dtype=bool) | is_last_step
 
             if 'is_action_valid' in infos[0]:
                 batch.non_tensor_batch['is_action_valid'] = np.array([info['is_action_valid'] for info in infos], dtype=bool)

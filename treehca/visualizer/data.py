@@ -73,8 +73,14 @@ def load_file(path: Path) -> Document:
             except ValueError as exc:
                 raise ValueError(f"{path.name}, line {line_number}: invalid JSON; file may still be writing. Refresh to retry.") from exc
             ancestry = record.get("node_path") if isinstance(record, dict) else None
-            if not isinstance(ancestry, list) or len(ancestry) < 2 or not all(isinstance(x, str) and x for x in ancestry) or ancestry[-1] != "root" or len(set(ancestry)) != len(ancestry):
-                raise ValueError(f"{path.name}, line {line_number}: expected a unique node-to-root node_path ending in 'root'.")
+            if (
+                not isinstance(ancestry, list)
+                or not ancestry
+                or not all(isinstance(x, str) and x for x in ancestry)
+                or ("root" in ancestry and (ancestry[-1] != "root" or len(ancestry) < 2))
+                or len(set(ancestry)) != len(ancestry)
+            ):
+                raise ValueError(f"{path.name}, line {line_number}: expected a nonempty unique node-to-ancestor node_path (optional final root sentinel).")
             rows.append((line_number, record))
     if not rows:
         raise ValueError(f"{path.name}: no rollout records.")
@@ -82,13 +88,15 @@ def load_file(path: Path) -> Document:
     # A top-level branch is always identifiable, even with missing ancestor rows.
     branches: dict[str, list[tuple[int, dict]]] = {}
     for line_number, record in rows:
-        branches.setdefault(record["node_path"][-2], []).append((line_number, record))
+        ancestry = record["node_path"]
+        initial_node = ancestry[-2] if ancestry[-1] == "root" else ancestry[-1]
+        branches.setdefault(initial_node, []).append((line_number, record))
     groups: dict[tuple, list[tuple[int, dict]]] = {}
     for branch_uid, branch_rows in branches.items():
         ids = {str(r.get("tree_uid", r.get("uid"))) for _, r in branch_rows if r.get("tree_uid", r.get("uid")) is not None}
         if len(ids) > 1:
             raise ValueError(f"{path.name}: conflicting tree IDs in branch {branch_uid}.")
-        root_inputs = {r["input"] for _, r in branch_rows if len(r["node_path"]) == 2 and isinstance(r.get("input"), str)}
+        root_inputs = {r["input"] for _, r in branch_rows if len(r["node_path"]) == (2 if r["node_path"][-1] == "root" else 1) and isinstance(r.get("input"), str)}
         if ids:
             key = ("saved tree ID", next(iter(ids)))
         elif len(root_inputs) == 1:
@@ -99,19 +107,20 @@ def load_file(path: Path) -> Document:
 
     trees = []
     for index, ((grouping, group_id), group_rows) in enumerate(groups.items(), 1):
-        nodes = {"root": Node("root", None, 0)}
+        nodes = {}
         warnings = []
         if grouping != "saved tree ID":
             warnings.append("Tree grouping is inferred: identical initial inputs may merge separate episodes. Save uid/tree_uid to make grouping exact." if grouping.startswith("inferred") else "Initial input is unavailable or ambiguous; this tree shows one initial branch only.")
         for line_number, record in sorted(group_rows):
             chain = list(reversed(record["node_path"]))
-            for depth, uid in enumerate(chain[1:], 1):
-                parent = chain[depth - 1]
+            for depth, uid in enumerate(chain):
+                parent = chain[depth - 1] if depth else None
                 if uid in nodes and (nodes[uid].parent != parent or nodes[uid].depth != depth):
                     raise ValueError(f"{path.name}, line {line_number}: conflicting ancestry for {uid}.")
                 if uid not in nodes:
                     nodes[uid] = Node(uid, parent, depth)
-                    nodes[parent].children.append(uid)
+                    if parent is not None:
+                        nodes[parent].children.append(uid)
             node = nodes[record["node_path"][0]]
             node.records.append(record)
             node.lines.append(line_number)
@@ -183,7 +192,7 @@ def graph_elements(tree: Tree, metric: str | None = None):
     positions = {}
     column = 0
     # Iterative postorder also handles long paths without Python recursion limits.
-    stack = [("root", False)]
+    stack = [(uid, False) for uid, node in reversed(list(tree.nodes.items())) if node.parent is None]
     while stack:
         uid, visited = stack.pop()
         node = tree.nodes[uid]

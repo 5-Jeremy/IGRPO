@@ -1404,10 +1404,10 @@ class RayPPOTrainer:
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
                             rollout_fields = None
-                            if self.config.algorithm.adv_estimator == AdvantageEstimator.TREEHCA:
-                                from treehca.rollout_records import build_treehca_rollout_fields
+                            if self.config.algorithm.adv_estimator in (AdvantageEstimator.TREEHCA, AdvantageEstimator.GiGPO):
+                                from treehca.rollout_records import build_rollout_fields
 
-                                rollout_fields = build_treehca_rollout_fields(batch.non_tensor_batch, batch.batch)
+                                rollout_fields = build_rollout_fields(batch.non_tensor_batch, batch.batch)
                             self._dump_generations(
                                 inputs=inputs,
                                 outputs=outputs,

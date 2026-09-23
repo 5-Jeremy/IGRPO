@@ -46,7 +46,7 @@ def test_missing_ancestor_and_out_of_order_nodes(tmp_path):
     assert tree.statistics["missing_ancestors"] == 1
 
 
-@pytest.mark.parametrize("path", [["a", "a", "root"], ["a"], ["root", "a"], [1, "root"]])
+@pytest.mark.parametrize("path", [["a", "a", "root"], [], ["root"], ["root", "a"], [1, "root"]])
 def test_invalid_paths_report_line(tmp_path, path):
     with pytest.raises(ValueError, match="line 1"):
         load_file(write_rows(tmp_path / "1.jsonl", [{"node_path": path}]))
@@ -306,3 +306,28 @@ window.dash_clientside.callback_context.triggered_id = 'fit-subtree';
 assert.deepEqual(fit(0,0,elements,null), ['unchanged','unchanged']);
 """
     subprocess.run([node, "-e", script, str(asset)], check=True, capture_output=True, text=True)
+
+
+def test_rootless_group_layout_and_selection(tmp_path):
+    from treehca.visualizer.app import create_app
+    from dash._callback_context import context_value
+    from dash._utils import AttributeDict
+
+    rows = [dict(node_path=["b", "a"], uid="group"), dict(node_path=["c"], uid="group"), dict(node_path=["a"], uid="group")]
+    tree = load_file(write_rows(tmp_path / "1.jsonl", rows)).trees[0]
+    assert "root" not in tree.nodes
+    assert tree.nodes["a"].parent is None
+    assert tree.nodes["a"].children == ["b"]
+    assert tree.statistics["missing_ancestors"] == 0
+    elements, _ = graph_elements(tree)
+    nodes = {e["data"]["id"]: e for e in elements if "position" in e}
+    assert nodes["a"]["position"]["y"] == nodes["c"]["position"]["y"] == 0
+    assert nodes["a"]["position"]["x"] != nodes["c"]["position"]["x"]
+    assert nodes["b"]["position"]["y"] == 110
+    app = create_app(tmp_path)
+    callback = app.callback_map["selection.data"]["callback"].__wrapped__
+    token = context_value.set(AttributeDict(triggered_inputs=[]))
+    try:
+        assert callback({"file": "1.jsonl", "tree": 0}, None)["node"] == "a"
+    finally:
+        context_value.reset(token)

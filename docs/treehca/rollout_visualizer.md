@@ -1,4 +1,4 @@
-# WebShop rollout tree visualizer
+# WebShop rollout visualizer
 
 From the repository root, run:
 
@@ -69,8 +69,10 @@ metrics. The unchanged raw records remain available in the JSONL files.
 ## Reconstruction and limitations
 
 Each JSONL line must be an object containing `node_path`, ordered from the current
-node to the `"root"` sentinel. The path reconstructs edges even if records arrive
-out of order. A synthetic root joins initial branches; ancestors lacking their
+node to its oldest ancestor. Tree algorithms end paths with the `"root"` sentinel;
+GiGPO paths end at the first action, with separate trajectories displayed side by
+side in their saved `uid` group. Single-node paths are valid. The path reconstructs
+edges even if records arrive out of order. When present, a synthetic root joins initial branches; ancestors lacking their
 own saved rows are shown as placeholders. Repeated IDs within a path and
 conflicting ancestry are rejected instead of producing misleading edges.
 
@@ -114,10 +116,21 @@ node log. When an environment supplies no success flag, the reason is the less
 specific `environment_terminal`. Actual environment termination takes precedence
 over the turn limit, which takes precedence over pruning.
 
-Collection is gated to TreeHCA; the extra worker metadata is confined to the
-TreeHCA WebShop worker. Serialization reads the final training batch after
-reordering, so values and advantages align with the saved node records. The
-existing algorithms' rollout decisions, rewards, and export format are unchanged.
+GiGPO also saves these shared diagnostics: group and trajectory IDs, node links
+and paths, turn, terminal flag/reason, environment termination, pre-action page
+type, post-action observation, WebShop task/session IDs, action validity, rewards,
+and masked training values/advantages. It additionally saves episode rewards,
+episode lengths, and tool-call counts. Node IDs use `traj_uid:traj_step`; initial
+nodes have a null parent, without a synthetic root. This also applies to GiGPO's
+dynamic sampling through the shared collection loop.
+
+GiGPO does not compute TreeHCA's answer-probability or information-gain estimates;
+`avg_ans_log_probs`, `info_gain`, and `info_gain_sum` are null when unavailable.
+Pruning and expansion fields are omitted for GiGPO. Serialization reads the final
+training batch after reordering, so values and advantages align with saved nodes.
+Rollout decisions and reward computation are unchanged. Older GiGPO files that
+only saved input/output/score lack trajectory identity and cannot be reconstructed;
+use newly generated logs.
 
 ## `rewards` versus `score`
 
