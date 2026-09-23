@@ -207,11 +207,13 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
                                         prob_diff_mode: bool = True,
                                         prob_floor: float = 1e-6,
                                         max_inv_ratio: float = 2.0,
+                                        grpo_weight: float = 0.7,
                                         q_weight: float = 0.3,
+                                        aux_mode: str = "hindsight",
                                         norm_adv_by_std: bool = True):
     """GRPO advantage blended with a hindsight-weighted Q term.
 
-        A = (1 - q_weight) * A_grpo + q_weight * A_aux
+        A = grpo_weight * A_grpo + q_weight * A_aux
 
     The primary signal is the ordinary GRPO advantage, computed by the shared
     :func:`compute_grpo_outcome_advantage` so it is identical to what IGRPO uses.
@@ -231,10 +233,25 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
     therefore ranges from -Q to +Q, which stops one collapsed child probability from
     dominating the batch.
 
+    With ``aux_mode="td"`` the hindsight factor is dropped and the auxiliary term is the
+    temporal-difference residual instead,
+
+        A_aux = Q(node) - Q(parent)
+
+    Q(parent) is the mean of its children, so this sums to zero over every sibling set
+    by construction rather than approximately, at the cost of no longer using p_gt.
+
+    Roots get no auxiliary term under either form. P(gold | question) is never measured,
+    so there is no prior for the first turn to be scored against, and a root has no
+    parent Q either.
+
     Args:
         max_inv_ratio: cap on 1 / h, see above
-        q_weight: share of the auxiliary term in the blend. 0 is plain GRPO, 1 is pure
-            hindsight, the default 0.3 is a 70/30 split favouring GRPO
+        aux_mode: "hindsight" for Q * (1 - 1/h), "td" for Q(node) - Q(parent)
+        grpo_weight: coefficient on the GRPO term
+        q_weight: coefficient on the auxiliary term. The two are independent, so they
+            need not sum to 1: 0.7/0.3 is a convex blend favouring GRPO, 1.0/1.0 adds
+            the aux term at full strength on top of an unscaled GRPO advantage
 
     Returns:
         advantages / returns: `(torch.Tensor)` shape (bs, response_length)
@@ -242,8 +259,12 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
     """
     if max_inv_ratio <= 0:
         raise ValueError(f"treehca.max_inv_ratio must be > 0, got {max_inv_ratio}")
-    if not 0.0 <= q_weight <= 1.0:
-        raise ValueError(f"treehca.q_weight must be in [0, 1], got {q_weight}")
+    if q_weight < 0.0:
+        raise ValueError(f"treehca.q_weight must be >= 0, got {q_weight}")
+    if grpo_weight < 0.0:
+        raise ValueError(f"treehca.grpo_weight must be >= 0, got {grpo_weight}")
+    if aux_mode not in ("hindsight", "td"):
+        raise ValueError(f"Invalid treehca.aux_mode: {aux_mode}, expected one of ['hindsight', 'td']")
 
     grpo_advantages, _ = compute_grpo_outcome_advantage(
         token_level_rewards=token_level_rewards,
@@ -281,16 +302,20 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
                 q[node] = float(scores[row_of[node]])
 
         node_aux = {}
-        factors, clipped = [], 0
+        factors, clipped, roots = [], 0, 0
         for node, i in row_of.items():
-            p = _gt_prob(info_gain_sum[i], prob_diff_mode, prob_floor)
             parent = parent_node_uid[i]
-            if parent in row_of:
-                p_parent = _gt_prob(info_gain_sum[row_of[parent]], prob_diff_mode, prob_floor)
-            else:
-                # no parent in the batch: nothing retrieved yet, so the prior sits at
-                # the floor and the node keeps its full +Q
-                p_parent = prob_floor
+            if parent not in row_of:
+                # P(gold | question) is never measured and a root has no parent Q, so
+                # there is nothing to credit the first turn against
+                node_aux[node] = 0.0
+                roots += 1
+                continue
+            if aux_mode == "td":
+                node_aux[node] = q[node] - q[parent]
+                continue
+            p = _gt_prob(info_gain_sum[i], prob_diff_mode, prob_floor)
+            p_parent = _gt_prob(info_gain_sum[row_of[parent]], prob_diff_mode, prob_floor)
             inv_ratio = p_parent / p  # _gt_prob floors p, so this cannot divide by zero
             if inv_ratio > max_inv_ratio:
                 inv_ratio = max_inv_ratio
@@ -303,14 +328,21 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
         for i in range(bs):
             aux[i] = node_aux[node_uid[i]]
 
-        grpo_term = (1.0 - q_weight) * grpo_advantages
+        grpo_term = grpo_weight * grpo_advantages
         aux_term = q_weight * aux.unsqueeze(-1) * response_mask
         advantages = grpo_term + aux_term
 
     leaves = [node for node in row_of if len(children[node]) == 0]
+    token_count = response_mask.sum().clamp(min=1.0)
+    # signed and token-weighted, i.e. the push the term actually applies in the loss.
+    # an abs mean hides the sign and a plain mean is diluted by padding.
+    aux_mean = (aux_term.sum() / token_count).item()
+    aux_var = ((aux_term - aux_mean) ** 2 * response_mask).sum() / token_count
+    aux_std = float(aux_var.sqrt().item())
     metrics = {
         "treehca/node_count": float(len(row_of)),
         "treehca/leaf_count": float(len(leaves)),
+        "treehca/root_frac": float(roots) / max(len(row_of), 1),
         "treehca/q/mean": float(np.mean(list(q.values()))) if q else 0.0,
         "treehca/hindsight_factor/mean": float(np.mean(factors)) if factors else 0.0,
         "treehca/hindsight_factor/neg_frac": float(np.mean([f < 0 for f in factors])) if factors else 0.0,
@@ -318,6 +350,9 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
         # post-blend, so the two are directly comparable as contributions to the loss
         "treehca/grpo_adv/abs_mean": grpo_term.abs().mean().item(),
         "treehca/aux_adv/abs_mean": aux_term.abs().mean().item(),
+        "treehca/aux_adv/mean": aux_mean,
+        # directional push relative to the term's own spread, keep it under ~0.05
+        "treehca/aux_adv/bias_ratio": abs(aux_mean) / aux_std if aux_std > 0 else 0.0,
     }
 
     return advantages, advantages, metrics

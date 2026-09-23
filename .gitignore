@@ -132,3 +132,6 @@ data/
 .tmp
 *ports
 
+# trajectory dumps and advantage exports, regenerate with scripts/audit_*.py
+analysis/
+

@@ -21,6 +21,7 @@ DEFAULT_DIR = "/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO/se
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data_dir", default=DEFAULT_DIR, help="Directory holding test.parquet.")
+    parser.add_argument("--split", default="test", help="Split to slice: test or train.")
     parser.add_argument("--sources", nargs="+", default=["hotpotqa"], help="data_source values to keep.")
     parser.add_argument("--n", type=int, default=1024, help="Examples per source. 0 keeps all of them.")
     parser.add_argument("--seed", type=int, default=0)
@@ -28,12 +29,12 @@ def main():
     args = parser.parse_args()
 
     data_dir = os.path.expanduser(args.data_dir)
-    df = pd.read_parquet(os.path.join(data_dir, "test.parquet"))
+    df = pd.read_parquet(os.path.join(data_dir, f"{args.split}.parquet"))
 
     available = set(df["data_source"].unique())
     missing = [s for s in args.sources if s not in available]
     if missing:
-        raise SystemExit(f"data_source not present in test.parquet: {missing}\navailable: {sorted(available)}")
+        raise SystemExit(f"data_source not present in {args.split}.parquet: {missing}\navailable: {sorted(available)}")
 
     subsets = []
     for source in args.sources:

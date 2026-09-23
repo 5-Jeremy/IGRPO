@@ -101,6 +101,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.resume_from_path=$CKPT_PATH \
     trainer.val_before_train=True \
     trainer.val_only=True \
+    trainer.validation_data_dir="${VALIDATION_DATA_DIR:-null}" \
     trainer.total_epochs=1 \
     hydra.run.dir='./output/${now:%Y-%m-%d}/${now:%H-%M-%S}' \
     hydra.output_subdir=null
