@@ -342,6 +342,19 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             )
         else:
             raise ValueError(f"Invalid treehca.credit: {treehca_credit}, expected one of ['snis', 'q_hindsight']")
+        if kwargs.get("treehca_no_progress_advantage_cap", False):
+            advantages, no_progress_metrics = core_treehca.cap_no_progress_advantages(
+                advantages=advantages,
+                response_mask=data.batch["response_mask"],
+                node_uid=data.non_tensor_batch["node_uid"],
+                parent_node_uid=data.non_tensor_batch["parent_node_uid"],
+                is_terminal=data.non_tensor_batch["is_terminal"],
+                info_gain=data.non_tensor_batch["info_gain"],
+                successful_terminal=data.non_tensor_batch["termination_reason"] == "success",
+                turns_threshold=kwargs.get("treehca_no_progress_turns_threshold", 3),
+                info_gain_threshold=kwargs.get("treehca_no_progress_info_gain_threshold", 0.05),
+            )
+            treehca_metrics.update(no_progress_metrics)
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
         data.meta_info["treehca_metrics"] = treehca_metrics
@@ -654,6 +667,15 @@ class RayPPOTrainer:
             assert config.reward_model.reward_manager == "tree_structure", "TreeHCA requires reward_model.reward_manager='tree_structure'"
             assert config.algorithm.igrpo.reward_mode in ["avg", "max"], "TreeHCA requires algorithm.igrpo.reward_mode in ['avg', 'max']; 'full' unrolls the tree into root-to-leaf chains"
             assert config.algorithm.treehca.leaf_baseline in ["group", "none"], f"Invalid treehca.leaf_baseline: {config.algorithm.treehca.leaf_baseline}"
+            no_progress_advantage_cap = config.algorithm.treehca.get("no_progress_advantage_cap", False)
+            if not isinstance(no_progress_advantage_cap, bool):
+                raise ValueError(f"treehca.no_progress_advantage_cap must be a bool, got {no_progress_advantage_cap!r}")
+            no_progress_turns_threshold = config.algorithm.treehca.get("no_progress_turns_threshold", 3)
+            if not isinstance(no_progress_turns_threshold, int) or isinstance(no_progress_turns_threshold, bool) or no_progress_turns_threshold < 1:
+                raise ValueError(f"treehca.no_progress_turns_threshold must be an integer >= 1, got {no_progress_turns_threshold!r}")
+            no_progress_info_gain_threshold = config.algorithm.treehca.get("no_progress_info_gain_threshold", 0.05)
+            if not isinstance(no_progress_info_gain_threshold, (int, float)) or isinstance(no_progress_info_gain_threshold, bool) or not np.isfinite(no_progress_info_gain_threshold) or no_progress_info_gain_threshold < 0:
+                raise ValueError(f"treehca.no_progress_info_gain_threshold must be a finite float >= 0, got {no_progress_info_gain_threshold!r}")
 
         print("[validate_config] All configuration checks passed successfully!")
 
@@ -1395,6 +1417,9 @@ class RayPPOTrainer:
                             treehca_grpo_weight=self.config.algorithm.treehca.grpo_weight,
                             treehca_q_weight=self.config.algorithm.treehca.q_weight,
                             treehca_aux_mode=self.config.algorithm.treehca.aux_mode,
+                            treehca_no_progress_advantage_cap=self.config.algorithm.treehca.get("no_progress_advantage_cap", False),
+                            treehca_no_progress_turns_threshold=self.config.algorithm.treehca.get("no_progress_turns_threshold", 3),
+                            treehca_no_progress_info_gain_threshold=self.config.algorithm.treehca.get("no_progress_info_gain_threshold", 0.05),
                         )
                         metrics.update(batch.meta_info.pop("treehca_metrics", {}))
                         self.debug_batch_instance(batch, "after_adv")

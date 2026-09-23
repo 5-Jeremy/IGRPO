@@ -35,6 +35,99 @@ import torch
 from verl.trainer.ppo.core_algos import compute_grpo_outcome_advantage
 
 
+def cap_no_progress_advantages(
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    node_uid: np.ndarray,
+    parent_node_uid: np.ndarray,
+    is_terminal: np.ndarray,
+    info_gain: np.ndarray,
+    successful_terminal: np.ndarray,
+    turns_threshold: int = 3,
+    info_gain_threshold: float = 0.05,
+):
+    """Cap advantages for sustained low-progress runs on successful paths.
+
+    Every successful terminal defines one root-to-leaf rollout. A maximal
+    contiguous run whose nodes all have information gain strictly below the
+    configured threshold is capped when it contains enough turns. Logical
+    nodes duplicated in the batch are modified together. Terminal nodes are
+    excluded from both the run length and the modification.
+
+    Returns:
+        The modified advantages and diagnostics for the trainer logger.
+    """
+    if isinstance(turns_threshold, (bool, np.bool_)) or not isinstance(turns_threshold, (int, np.integer)) or turns_threshold < 1:
+        raise ValueError(f"treehca.no_progress_turns_threshold must be an integer >= 1, got {turns_threshold!r}")
+    if isinstance(info_gain_threshold, (bool, np.bool_)) or not np.isscalar(info_gain_threshold):
+        raise ValueError(f"treehca.no_progress_info_gain_threshold must be a finite float >= 0, got {info_gain_threshold!r}")
+    info_gain_threshold = float(info_gain_threshold)
+    if not np.isfinite(info_gain_threshold) or info_gain_threshold < 0:
+        raise ValueError(f"treehca.no_progress_info_gain_threshold must be a finite float >= 0, got {info_gain_threshold!r}")
+
+    batch_size = advantages.shape[0]
+    if any(len(values) != batch_size for values in (response_mask, node_uid, parent_node_uid, is_terminal, info_gain, successful_terminal)):
+        raise ValueError("TreeHCA no-progress inputs must all have the same batch size")
+
+    node_rows = defaultdict(list)
+    for row, node in enumerate(node_uid):
+        node_rows[node].append(row)
+    row_of = {node: rows[0] for node, rows in node_rows.items()}
+
+    nodes_to_cap = set()
+    successful_rollouts = 0
+    qualifying_runs = 0
+    for terminal_node, terminal_rows in node_rows.items():
+        if not any(bool(successful_terminal[row]) for row in terminal_rows):
+            continue
+        successful_rollouts += 1
+
+        # Follow the stored tree edges, then scan the rollout chronologically.
+        path = []
+        node = terminal_node
+        seen = set()
+        while node in row_of:
+            if node in seen:
+                raise ValueError(f"Cycle in TreeHCA rollout tree at {node}")
+            seen.add(node)
+            path.append(node)
+            node = parent_node_uid[row_of[node]]
+
+        run = []
+        for node in reversed(path):
+            if bool(is_terminal[row_of[node]]):
+                if len(run) >= turns_threshold:
+                    nodes_to_cap.update(run)
+                    qualifying_runs += 1
+                run = []
+                continue
+            if float(info_gain[row_of[node]]) < info_gain_threshold:
+                run.append(node)
+                continue
+            if len(run) >= turns_threshold:
+                nodes_to_cap.update(run)
+                qualifying_runs += 1
+            run = []
+        if len(run) >= turns_threshold:
+            nodes_to_cap.update(run)
+            qualifying_runs += 1
+
+    modified = advantages.clone()
+    capped_rows = [row for node in nodes_to_cap for row in node_rows[node]]
+    if capped_rows:
+        modified[capped_rows] = torch.minimum(modified[capped_rows], torch.zeros_like(modified[capped_rows]))
+        # Retain the standard invariant that padding has zero advantage.
+        modified[capped_rows] *= response_mask[capped_rows]
+
+    metrics = {
+        "treehca/no_progress/successful_rollout_count": float(successful_rollouts),
+        "treehca/no_progress/qualifying_run_count": float(qualifying_runs),
+        "treehca/no_progress/capped_node_count": float(len(nodes_to_cap)),
+        "treehca/no_progress/capped_row_count": float(len(capped_rows)),
+    }
+    return modified, metrics
+
+
 def _gt_prob(raw_value, prob_diff_mode: bool, prob_floor: float) -> float:
     """Ground-truth answer probability of a node.
 

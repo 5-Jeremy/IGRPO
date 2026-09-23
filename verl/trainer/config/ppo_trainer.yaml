@@ -275,6 +275,9 @@ algorithm:
     subtree_size_weight: True # scale w_c by the leaf count under child c, matching IGRPO's flat mean over subtree leaves
     leaf_baseline: group # group: GRPO-style baseline over the leaves of a prompt group; none: raw outcome score
     norm_adv_by_std: True # only used when leaf_baseline == group
+    no_progress_advantage_cap: False # cap advantages at zero for sustained low-info-gain runs on successful rollouts
+    no_progress_turns_threshold: 3 # minimum consecutive low-progress nodes to cap
+    no_progress_info_gain_threshold: 0.05 # a node has low progress when info_gain is strictly below this value
   igpo:
     prob_diff_mode: True
     use_think: False # whether to use the <think> content in IGPO
