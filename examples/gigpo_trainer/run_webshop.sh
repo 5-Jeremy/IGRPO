@@ -2,6 +2,9 @@ set -x
 set -o pipefail
 ENGINE=vllm
 SEED=${1:-0}
+# Small-catalog runs use the original seeded first-500 validation pool. Set this
+# to fixed_human only with env.webshop.use_small=False and the full catalog.
+WEBSHOP_VALIDATION_MODE=${WEBSHOP_VALIDATION_MODE:-fixed_human}
 ulimit -u 65536
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 # export RAY_DEBUG_POST_MORTEM=1
@@ -51,7 +54,7 @@ python3 -u -m verl.trainer.main_ppo \
     data.val_files=agent_system/environments/env_package/webshop/train_data/text/test.parquet \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_batch_size \
-    data.max_prompt_length=6144 \
+    data.max_prompt_length=5000 \
     data.max_response_length=512 \
     data.filter_overlong_prompts=True \
     data.truncation='middle' \
@@ -88,6 +91,8 @@ python3 -u -m verl.trainer.main_ppo \
     env.env_name=Webshop \
     env.webshop.use_small=False \
     env.webshop.human_goals=True \
+    env.webshop.synthetic_goal_limit=3000 \
+    env.webshop.validation.mode=$WEBSHOP_VALIDATION_MODE \
     env.seed=$SEED \
     env.max_steps=15 \
     env.rollout.n=$group_size \
