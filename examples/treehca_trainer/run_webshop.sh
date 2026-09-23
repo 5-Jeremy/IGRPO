@@ -50,6 +50,8 @@ EXPAND_SCORE=${EXPAND_SCORE:-log_ratio}
 # Q * (1 - 1/h), h = p_gt(node) / p_gt(parent).
 TREEHCA_CREDIT=${TREEHCA_CREDIT:-q_hindsight}
 
+AUX_MODE=${AUX_MODE:-hindsight} # td or hindsight
+
 # We only use data preparation to indicate the modality and the data size.
 python3 -m examples.data_preprocess.prepare \
     --mode 'text' \
@@ -73,7 +75,7 @@ python3 -u -m verl.trainer.main_ppo \
     algorithm.treehca.max_inv_ratio=2.0 \
     algorithm.treehca.q_weight=1.0 \
     algorithm.treehca.grpo_weight=1.0 \
-    algorithm.treehca.aux_mode=td \
+    algorithm.treehca.aux_mode=$AUX_MODE \
     algorithm.treehca.prob_floor=1e-6 \
     algorithm.treehca.weight_temp=1.0 \
     algorithm.treehca.max_weight_ratio=-1.0 \
