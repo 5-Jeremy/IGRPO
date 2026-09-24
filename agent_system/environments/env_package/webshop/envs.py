@@ -13,9 +13,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import ray
+import re
+
 import gym
 import numpy as np
+import ray
+
+
+_ACTION_PATTERN = re.compile(r"(search|click)\[(.*)\]", re.DOTALL)
+
+
+def is_admissible_webshop_action(action, available_actions):
+    """Return whether *action* can execute in the current WebShop state.
+
+    Projection checks response formatting, while this check validates the
+    projected command against the action set from the page before the
+    transition. Search queries are free-form; clicks must name an exact
+    currently clickable target (case-insensitively).
+    """
+    if not isinstance(action, str) or not isinstance(available_actions, dict):
+        return False, "invalid_command"
+
+    match = _ACTION_PATTERN.fullmatch(action)
+    if match is None:
+        return False, "invalid_command"
+
+    action_name, action_arg = match.groups()
+    action_arg = action_arg.lower()
+    if action_name == "search":
+        valid = bool(available_actions.get("has_search_bar")) and bool(action_arg.strip())
+        return valid, None if valid else "search_unavailable"
+
+    clickables = {str(value).lower() for value in available_actions.get("clickables", ())}
+    # The native environment deliberately ignores click[search], even when the
+    # search button is rendered as a clickable. Do not label that no-op valid.
+    valid = action_arg != "search" and action_arg in clickables
+    return valid, None if valid else "unavailable_click"
 
 # -----------------------------------------------------------------------------
 # Ray remote worker actor -----------------------------------------------------
@@ -51,8 +84,12 @@ class WebshopWorker:
     def step(self, action):
         """Execute a step in the environment"""
         session = self.env.unwrapped.session
+        available_actions = self.env.get_available_actions()
+        action_admissible, invalid_action_reason = is_admissible_webshop_action(action, available_actions)
         obs, reward, done, info = self.env.step(action)
         info = dict(info or {})  # make a *copy* so we can mutate safely
+        info["is_action_admissible"] = action_admissible
+        info["invalid_action_reason"] = invalid_action_reason
         info.setdefault('available_actions', self.env.get_available_actions())
         info['webshop_session_id'] = session
         info['webshop_task_id'] = getattr(self, '_rollout_task_id', None)

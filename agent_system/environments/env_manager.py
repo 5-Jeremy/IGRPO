@@ -431,7 +431,10 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
         }
         # add action_valid to infos
         for i, info in enumerate(infos):
-            info['is_action_valid'] = to_numpy(valids[i])
+            format_valid = bool(valids[i])
+            action_admissible = bool(info.get('is_action_admissible', True))
+            info['is_action_format_valid'] = to_numpy(format_valid)
+            info['is_action_valid'] = to_numpy(format_valid and action_admissible)
 
         rewards = to_numpy(rewards)
         dones = to_numpy(dones)
