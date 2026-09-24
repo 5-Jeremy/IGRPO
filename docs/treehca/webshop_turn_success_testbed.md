@@ -91,17 +91,27 @@ disabled, then calls the trainer's `apply_invalid_action_penalty`. The resulting
 training logger:
 
 ```text
-score(turn) = final episode reward - invalid_action_penalty * (not is_action_valid)
+ordinary turn score = final episode reward
+                     - invalid_action_penalty * (not is_action_valid)
+
+full-success terminal score = 10.0
+                            - 0.5 * (not is_action_valid)
 ```
 
-Native reward exactly 1 on purchase gives episode reward **10**. Partial or zero
-native reward, and non-purchase timeouts, give **0**. Every turn of that trajectory
-receives its final episode reward, then its own validity penalty. Consequently:
+Native reward exactly 1 on purchase normally gives episode reward **10**.
+Partial or zero native reward, and non-purchase timeouts, give **0**. A narrow
+fallback applies when an actual environment-terminal row has native
+`task_score == 1.0` but its training score is nevertheless zero: the full
+training reward of 10.0 is restored. Full-success terminals use a fixed 0.5
+validity penalty. Consequently:
 
-- A valid early turn in a successful trajectory has score 10.
-- An invalid turn in that trajectory has score approximately 9.9.
-- Valid turns in unsuccessful trajectories have score 0; invalid ones have
-  approximately -0.1.
+- A valid full-success terminal has score 10, including when restored.
+- An invalid full-success terminal has score 9.5, including when restored.
+- Partial-purchase terminals remain 0 when valid and approximately -0.1 when
+  invalid.
+- Nonterminal turns retain the configured invalid-action penalty.
+- Allocation-pruned and turn-limit rows do not use the restoration or the
+  full-success penalty.
 
 Values retain training's float32 arithmetic, including representations such as
 `-0.10000000149011612`. Validity comes from the production response parser:

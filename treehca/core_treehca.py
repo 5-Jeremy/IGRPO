@@ -434,6 +434,9 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
         traj_index=uid,  # unused, compute_mean_std_cross_steps ignores it
         norm_adv_by_std_in_grpo=norm_adv_by_std,
         compute_mean_std_cross_steps=True,
+        # adjust_batch may append random copies solely for worker divisibility.
+        # They are training rows, but must not reweight the prompt-group baseline.
+        deduplicate_by=node_uid,
     )
 
     scores = token_level_rewards.sum(dim=-1)

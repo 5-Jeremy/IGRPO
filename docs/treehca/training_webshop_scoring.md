@@ -245,6 +245,35 @@ actor weights are fixed. Its caches therefore cannot survive a policy update.
 The adapter API also requires `policy_version`; changing it clears probability
 caches while retaining model-independent plans.
 
+## Terminal penalties and padding-independent GRPO
+
+TreeHCA records WebShop's native `task_score` on every rollout row so full
+success can be distinguished from partial purchases. The worker's ordinary
+training reward remains binary: a perfect purchase is 10 and other outcomes are
+0. If an actual environment-terminal row has native `task_score == 1.0` but
+its training score is nevertheless zero, the trainer restores the full
+training reward of 10.0. Invalid full-success terminals use a fixed 0.5
+format/language penalty, so they receive 9.5; valid full-success terminals
+remain at 10.0.
+
+The restoration and stronger penalty do not apply to positive partial
+purchases: they remain 0 when valid and -0.1 when invalid. They also do not
+apply to nonterminal turns, allocation-pruned leaves, turn-limit leaves, or
+zero-score failures. Full-success rows that already carry the normal reward do
+not need restoration, but invalid ones still receive the fixed 0.5 penalty.
+The trainer reports the restoration count as
+`episode/full_success_terminal_scores_restored`, and saved TreeHCA rollouts
+expose the source value as `webshop_task_score`.
+
+TreeHCA's `q_hindsight` estimator combines a GRPO term with its Q auxiliary
+term. `adjust_batch` may append copies of random rows solely to make the batch
+divisible by worker micro-batch sizes. Those rows still train and receive the
+same advantage as their logical `node_uid`, but only the first row for each
+logical node contributes to the GRPO group mean and standard deviation. Thus
+hardware padding no longer changes the TreeHCA baseline. The generic GRPO
+estimator retains its previous behavior unless a logical-row deduplication key
+is supplied.
+
 ## Verification
 
 Run in the existing `webshop` environment with `PYTHONPATH=.`:

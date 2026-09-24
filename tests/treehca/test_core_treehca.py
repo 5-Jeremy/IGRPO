@@ -256,6 +256,63 @@ def test_pruned_leaf_propagates_normally_without_a_full_score_descendant():
     assert metrics["treehca/premature_leaf_filter/protected_ancestor_count"] == 0
 
 
+def test_q_grpo_baseline_ignores_adjust_batch_copies():
+    rewards = torch.tensor([[0.0], [2.0], [4.0], [4.0]])
+    advantages, _, _ = compute_treehca_q_outcome_advantage(
+        token_level_rewards=rewards,
+        response_mask=torch.ones_like(rewards),
+        uid=np.asarray(["group"] * 4, dtype=object),
+        node_uid=np.asarray(["a", "b", "c", "c"], dtype=object),
+        parent_node_uid=np.asarray(["outside"] * 4, dtype=object),
+        is_terminal=np.ones(4, dtype=bool),
+        termination_reason=np.asarray(["turn_limit"] * 4, dtype=object),
+        info_gain_sum=np.ones(4),
+        traj_step=np.zeros(4, dtype=int),
+        grpo_weight=1.0,
+        q_weight=0.0,
+        aux_mode="td",
+    )
+
+    # The logical rewards are [0, 2, 4], whose sample mean/std are 2/2.
+    # The copied c row receives the same result without reweighting the baseline.
+    assert advantages.squeeze(-1).tolist() == pytest.approx([-1.0, 0.0, 1.0, 1.0], abs=1e-5)
+
+
+def test_invalid_penalty_restores_and_more_strongly_penalizes_full_success_terminals():
+    from verl.trainer.ppo.ray_trainer import apply_invalid_action_penalty
+
+    data = DataProto.from_dict(
+        tensors={
+            "prompts": torch.ones(7, 1, dtype=torch.long),
+            "responses": torch.ones(7, 2, dtype=torch.long),
+            "attention_mask": torch.tensor([[1, 1, 0]] * 7),
+            "token_level_scores": torch.tensor(
+                [
+                    [0.0, 0.0],
+                    [0.0, 0.0],
+                    [0.0, 0.0],
+                    [0.0, 0.0],
+                    [0.0, 0.0],
+                    [0.0, 0.0],
+                    [10.0, 0.0],
+                ]
+            ),
+        },
+        non_tensors={
+            "is_action_valid": np.asarray([True, False, False, False, True, False, False]),
+            "environment_done": np.asarray([True, True, False, True, True, True, True]),
+            "webshop_task_score": np.asarray([0.4, 0.4, 0.4, 0.0, 1.0, 1.0, 1.0], dtype=object),
+        },
+    )
+
+    result, metrics = apply_invalid_action_penalty(data, 0.1)
+
+    assert result.batch["token_level_scores"][:, 0].tolist() == pytest.approx(
+        [0.0, -0.1, -0.1, -0.1, 10.0, 9.5, 9.5]
+    )
+    assert metrics["episode/full_success_terminal_scores_restored"] == 2
+
+
 def test_tree_reward_manager_excludes_pruned_leaf_from_protected_ancestor_average():
     from types import SimpleNamespace
 

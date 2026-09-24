@@ -186,6 +186,9 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
 def apply_invalid_action_penalty(data: DataProto, invalid_action_penalty_coef=float):
     reward_tensor = data.batch['token_level_scores']
+    environment_done = data.non_tensor_batch.get('environment_done')
+    webshop_task_scores = data.non_tensor_batch.get('webshop_task_score')
+    restored_full_success_terminal_scores = 0
     if 'step_rewards' in data.batch.keys():
         step_rewards = data.batch['step_rewards']
     for i in range(len(data)):
@@ -199,15 +202,33 @@ def apply_invalid_action_penalty(data: DataProto, invalid_action_penalty_coef=fl
 
         action_valids = data_item.non_tensor_batch['is_action_valid'].astype(np.float32)
         action_invalids = torch.tensor(1 - action_valids, dtype=torch.float32, device=prompt_ids.device).squeeze(0)
+        # Full-success WebShop environment terminals use the training reward
+        # scale (10) and a stronger 0.5 response penalty. Partial purchases,
+        # allocation-pruned rows, turn-limit rows, and non-WebShop data retain
+        # the ordinary zero/-configured-penalty behavior.
+        full_success_terminal = False
+        if environment_done is not None and webshop_task_scores is not None and bool(environment_done[i]):
+            native_terminal_score = webshop_task_scores[i]
+            if native_terminal_score is not None:
+                native_terminal_score = float(native_terminal_score)
+                full_success_terminal = native_terminal_score == 1.0
+                reward_index = valid_response_length - 1
+                if full_success_terminal and reward_tensor[i, reward_index] <= 0:
+                    reward_tensor[i, reward_index] = 10.0
+                    restored_full_success_terminal_scores += 1
+        action_penalty_coef = 0.5 if full_success_terminal else invalid_action_penalty_coef
         # invalid action penalty
         # assert reward_tensor[i, valid_response_length - 1] != 0.0, f'i={i}'
-        reward_tensor[i, valid_response_length - 1] -= invalid_action_penalty_coef * action_invalids
+        reward_tensor[i, valid_response_length - 1] -= action_penalty_coef * action_invalids
 
         if 'step_rewards' in data.batch.keys():
-            step_rewards[i] -= invalid_action_penalty_coef * action_invalids
+            step_rewards[i] -= action_penalty_coef * action_invalids
     
     valid_action_ratio = np.mean(data.non_tensor_batch['is_action_valid'].astype(np.float32)).item()
-    metrics = {'episode/valid_action_ratio': valid_action_ratio}
+    metrics = {
+        'episode/valid_action_ratio': valid_action_ratio,
+        'episode/full_success_terminal_scores_restored': restored_full_success_terminal_scores,
+    }
     return data, metrics
 
 def compute_response_mask(data: DataProto):

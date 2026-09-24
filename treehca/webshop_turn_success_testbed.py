@@ -273,6 +273,8 @@ def assign_training_scores(records: list[RecordedTurn], episodes: list[dict], to
                 "episode_rewards": np.array([episodes[row.rollout_index]["episode_rewards"] for row in rows], dtype=np.float32),
                 "episode_lengths": np.array([episodes[row.rollout_index]["episode_lengths"] for row in rows], dtype=np.float32),
                 "is_action_valid": np.array([row.is_action_valid for row in rows], dtype=bool),
+                "environment_done": np.array([row.done for row in rows], dtype=bool),
+                "webshop_task_score": np.array([row.task_score for row in rows], dtype=np.float32),
             },
         )
         batch.batch["token_level_scores"] = reward_manager(batch)

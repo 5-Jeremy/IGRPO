@@ -25,6 +25,9 @@ def capture_step_logging(*, next_obs, infos, dones, is_last_step):
         "post_action_observation": np.asarray(list(observations) if observations is not None else [None] * len(infos), dtype=object),
         "webshop_task_id": np.asarray([info.get("webshop_task_id") for info in infos], dtype=object),
         "webshop_session_id": np.asarray([info.get("webshop_session_id") for info in infos], dtype=object),
+        # Preserve WebShop's native score so the invalid-response adjustment can
+        # distinguish full success from partial purchases on environment terminals.
+        "webshop_task_score": np.asarray([info.get("task_score") for info in infos], dtype=object),
     }
 
 
@@ -108,6 +111,7 @@ def build_rollout_fields(non_tensor_batch, tensor_batch=None):
         "post_action_observation",
         "webshop_task_id",
         "webshop_session_id",
+        "webshop_task_score",
         "is_action_valid",
         "rewards",
     )

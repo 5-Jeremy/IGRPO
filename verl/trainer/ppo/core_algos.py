@@ -118,6 +118,7 @@ def compute_grpo_outcome_advantage(
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
     compute_mean_std_cross_steps: bool = True,
+    deduplicate_by: np.ndarray | None = None,
 ):
     """
     Compute advantage for GRPO, operating only on Outcome reward
@@ -134,6 +135,10 @@ def compute_grpo_outcome_advantage(
         compute_mean_std_cross_steps: bool
             If True (more stable), the mean and std are computed across steps within one group. 
             If False (i.e., standard episode-level adv), the mean and std are computed across trajectories within one group.
+        deduplicate_by: optional logical-row identifiers. Only the first row for
+            each identifier contributes to group mean/std statistics, while all
+            rows still receive an advantage. This keeps batch-divisibility copies
+            from changing GRPO normalization.
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -147,9 +152,17 @@ def compute_grpo_outcome_advantage(
     id2mean = {}
     id2std = {}
     seen_pairs = set()
+    seen_deduplication_ids = set()
     with torch.no_grad():
         bsz = scores.shape[0]
+        if deduplicate_by is not None and len(deduplicate_by) != bsz:
+            raise ValueError("deduplicate_by must have one identifier per reward row")
         for i in range(bsz):
+            if deduplicate_by is not None:
+                deduplication_id = deduplicate_by[i]
+                if deduplication_id in seen_deduplication_ids:
+                    continue
+                seen_deduplication_ids.add(deduplication_id)
             if (index[i], traj_index[i]) in seen_pairs:
                 continue
             id2score[index[i]].append(scores[i])

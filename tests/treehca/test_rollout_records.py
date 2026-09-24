@@ -61,7 +61,7 @@ def test_branch_diagnostics_capture_actual_decision_and_terminal_observation(las
     observations = ["purchase success", "partial-credit purchase", "results", "product"]
     fields = capture_branch_logging(
         next_obs={"anchor": observations, "text": ["wrapped"] * 4},
-        infos=[{"won": True, "webshop_task_id": 7, "webshop_session_id": "original"}, {"won": False}, {}, {}],
+        infos=[{"won": True, "task_score": 1.0, "webshop_task_id": 7, "webshop_session_id": "original"}, {"won": False, "task_score": 0.4}, {}, {}],
         dones=np.array([True, True, False, False]),
         is_last_step=last,
         expand_prob=probabilities,
@@ -80,6 +80,7 @@ def test_branch_diagnostics_capture_actual_decision_and_terminal_observation(las
     assert fields["expansion_probability"].tolist() == [0, 0, 0.3, 0.7]
     assert fields["branch_score"].tolist() == [1, 0.2, 0.4, 0.8]
     assert fields["webshop_session_id"][0] == "original"
+    assert fields["webshop_task_score"].tolist() == [1.0, 0.4, None, None]
 
 
 def test_logged_training_values_mask_padding_and_keep_absence_explicit():
