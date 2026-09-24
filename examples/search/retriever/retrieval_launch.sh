@@ -1,4 +1,4 @@
-DATA=${DATA:-/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO}
+DATA=${DATA:-/scratch/user/sushil22_tamu.edu/projects/IGRPO/data}
 save_path=$DATA/searchR1
 
 index_file=$save_path/e5_Flat.index

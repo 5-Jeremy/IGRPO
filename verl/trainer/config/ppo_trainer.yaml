@@ -334,6 +334,11 @@ env:
     search_url: "http://127.0.0.1:8000/retrieve" # also support multiple urls: ["http://127.0.0.1:8000/retrieve", "http://127.0.0.1:8001/retrieve"]
     topk: 3
     timeout: 60
+  python:
+    timeout: 10
+    max_output_chars: 4000
+    max_code_chars: 12000
+    memory_mb: 1024
   sokoban:
     dim_room: [6, 6]
     num_boxes: 1

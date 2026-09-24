@@ -25,7 +25,7 @@ similarity_thresh=0.9 # similarity threshold for GiGPO
 export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 export MASTER_PORT=${MASTER_PORT:-29516}
 
-DATA=${DATA:-/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO}
+DATA=${DATA:-/scratch/user/sushil22_tamu.edu/projects/IGRPO/data}
 
 TRAIN_DATA=${TRAIN_DATA:-"$DATA/searchR1_processed_direct/train.parquet"}
 # 1024 HotpotQA dev examples, not the full 51,713-row test split; see

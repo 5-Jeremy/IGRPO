@@ -15,7 +15,7 @@ import os
 
 import pandas as pd
 
-DEFAULT_DIR = "/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO/searchR1_processed_direct"
+DEFAULT_DIR = "/scratch/user/sushil22_tamu.edu/projects/IGRPO/data/searchR1_processed_direct"
 
 
 def main():

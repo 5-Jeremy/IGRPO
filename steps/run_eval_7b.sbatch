@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=iclr-eval7b
-#SBATCH --account=prj-02-llm-reasoning-shakkottai
+#SBATCH --account=prj-02-llm-reasoning-kalathil
 #SBATCH --partition=def
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:8
 #SBATCH --mem=900G
 #SBATCH --time=1-00:00:00
-#SBATCH --output=/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO/runs/ICLR-eval/slurm-%j.out
+#SBATCH --output=/scratch/user/sushil22_tamu.edu/projects/IGRPO/data/runs/ICLR-eval/slurm-%j.out
 
 # Evaluate the step-200 7B checkpoints on the whole Search-R1 test split: all
 # 51,713 questions across the single-hop sets (nq, triviaqa, popqa) and the
@@ -31,9 +31,9 @@
 
 set -eo pipefail
 
-REPO=/scratch/user/debajoym98_tamu.edu/IGRPO
-DATA=/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO
-CONDA_BASE=/sw/eb/sw/Miniforge3/25.3.0-3
+REPO=/scratch/user/sushil22_tamu.edu/projects/IGRPO
+DATA=/scratch/user/sushil22_tamu.edu/projects/IGRPO/data
+CONDA_BASE=/scratch/user/sushil22_tamu.edu/miniconda3
 
 RUNS=${RUNS:-"igrpo-allval-7B igpo-allval-7B gigpo-allval-7B"}
 STEP=${STEP:-200}

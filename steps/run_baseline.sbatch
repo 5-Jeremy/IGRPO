@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=iclr_baseline
-#SBATCH --account=prj-02-llm-reasoning-shakkottai
+#SBATCH --account=prj-02-llm-reasoning-kalathil
 #SBATCH --partition=def
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:5
 #SBATCH --mem=320G
 #SBATCH --time=2-00:00:00
-#SBATCH --output=/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO/runs/ICLR/slurm-%j.out
+#SBATCH --output=/scratch/user/sushil22_tamu.edu/projects/IGRPO/data/runs/ICLR/slurm-%j.out
 
 # One search baseline end to end: bring up a private retrieval server on the
 # 5th GPU, wait for it to answer, then train on GPUs 0-3.
@@ -18,9 +18,9 @@
 
 set -eo pipefail
 
-REPO=/scratch/user/debajoym98_tamu.edu/IGRPO
-DATA=/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO
-CONDA_BASE=/sw/eb/sw/Miniforge3/25.3.0-3
+REPO=/scratch/user/sushil22_tamu.edu/projects/IGRPO
+DATA=/scratch/user/sushil22_tamu.edu/projects/IGRPO/data
+CONDA_BASE=/scratch/user/sushil22_tamu.edu/miniconda3
 
 : "${TRAIN_SCRIPT:?must be set, e.g. examples/igrpo_trainer/run_search.sh}"
 : "${EXPERIMENT_NAME:?must be set, e.g. igrpo-3B}"

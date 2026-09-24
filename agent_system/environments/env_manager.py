@@ -142,6 +142,25 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
     def fork_from(self, dest_index: int, src_index: int) -> None:
         self.memory.fork_from(dest_index, src_index)
         self.envs.fork_from(dest_index, src_index)
+
+
+class MathEnvironmentManager(SearchEnvironmentManager):
+    """Use the search manager's tree and history handling with math-only prompts."""
+
+    def build_text_obs(self, text_obs: List[str], init: bool = False) -> List[str]:
+        if not init and self.config.env.history_length > 0:
+            memory_ctx, _ = self.memory.fetch(
+                self.config.env.history_length, obs_key="information", action_key="search"
+            )
+        return [
+            MATH_TEMPLATE_NO_HIS.format(task_description=self.memory.tasks[i])
+            if init or self.config.env.history_length <= 0
+            else MATH_TEMPLATE.format(
+                task_description=self.memory.tasks[i],
+                memory_context=memory_ctx[i],
+            )
+            for i in range(len(text_obs))
+        ]
         
             
 
@@ -624,7 +643,12 @@ def make_envs(config):
     group_n = config.env.rollout.n if config.env.rollout.n > 0 else 1
     resources_per_worker = OmegaConf.to_container(config.env.resources_per_worker, resolve=True)
 
-    if "search" in config.env.env_name.lower():
+    if config.env.env_name.lower() == "math":
+        from agent_system.environments.env_package.math import build_math_envs, math_projection
+        _envs = build_math_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_config=config.env)
+        _val_envs = build_math_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_config=config.env)
+        return MathEnvironmentManager(_envs, math_projection, config), MathEnvironmentManager(_val_envs, math_projection, config)
+    elif "search" in config.env.env_name.lower():
         from agent_system.environments.env_package.search import build_search_envs, search_projection
         _envs = build_search_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_config=config.env)
         _val_envs = build_search_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_config=config.env)

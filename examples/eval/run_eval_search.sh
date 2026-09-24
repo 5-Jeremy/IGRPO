@@ -25,7 +25,7 @@ set -x
 
 ENGINE=${ENGINE:-vllm}
 
-DATA=${DATA:-/scratch/project/prj-02-llm-reasoning-shakkottai/debajoy/IGRPO}
+DATA=${DATA:-/scratch/user/sushil22_tamu.edu/projects/IGRPO/data}
 
 : "${CKPT_PATH:?must be set, e.g. \$DATA/runs/ICLR/igrpo-3B/checkpoints/global_step_200}"
 : "${EXPERIMENT_NAME:?must be set, e.g. igrpo-3B-eval200}"

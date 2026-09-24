@@ -3,7 +3,7 @@ set -x
 ENGINE=${1:-vllm}
 
 train_data_size=256
-val_data_size=${VAL_DATA_SIZE:-1024}
+val_data_size=${VAL_DATA_SIZE:-100}
 group_size=5
 
 export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
@@ -11,16 +11,13 @@ export MASTER_PORT=${MASTER_PORT:-29513}
 
 DATA=${DATA:-/scratch/user/sushil22_tamu.edu/projects/IGRPO/data}
 
-TRAIN_DATA=${TRAIN_DATA:-"$DATA/searchR1_processed_direct/train.parquet"}
-# 1024 HotpotQA dev examples, not the full 51,713-row test split; see
-# examples/data_preprocess/make_val_subset.py
-VAL_DATA=${VAL_DATA:-"$DATA/searchR1_processed_direct/val_subset.parquet"}
+TRAIN_DATA=${TRAIN_DATA:-"$DATA/math/train.parquet"}
+VAL_DATA=${VAL_DATA:-"$DATA/math/val.parquet"}
 
-MODEL_PATH="$DATA/Base_models/Qwen2.5-7B-Instruct"
-PROJECT_NAME=${PROJECT_NAME:-ICLR}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-treehca-7B}
-SEARCH_PORT=${SEARCH_PORT:-8011}
-# Checkpoints go to the project dir; /scratch/user is quota'd at 1 TB.
+MODEL_PATH=${MODEL_PATH:-$DATA/Base_models/Qwen2.5-Coder-3B-Instruct}
+PROJECT_NAME=${PROJECT_NAME:-MATH}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-treehca}
+# Checkpoints go under this repo's data directory.
 RUN_DIR=${RUN_DIR:-$DATA/runs/$PROJECT_NAME/$EXPERIMENT_NAME}
 DEBUG_DIR=${DEBUG_DIR:-$RUN_DIR/debug_batches}
 # info_val: (p_gt + info_gain) / 2, the original score. log_ratio: log p_gt(child) -
@@ -94,12 +91,12 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.use_invalid_action_penalty=True \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.01 \
     algorithm.use_kl_in_reward=False \
-    env.env_name=search \
+    env.env_name=math \
     env.seed=0 \
     env.max_steps=4 \
     env.rollout.n=$group_size \
     env.history_length=4 \
-    env.search.search_url="${SEARCH_URL:-http://127.0.0.1:${SEARCH_PORT}/retrieve}" \
+    env.python.timeout=${PYTHON_TIMEOUT:-10} \
     ray_init.num_cpus=${RAY_NUM_CPUS:-64} \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
