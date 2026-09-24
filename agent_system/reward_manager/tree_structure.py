@@ -1,7 +1,11 @@
-from verl import DataProto
-import torch
-import numpy as np
 from collections import defaultdict
+
+import numpy as np
+import torch
+
+from treehca.premature_leaf_filter import PrematureLeafFilter
+from verl import DataProto
+
 
 class TreeStructureRewardManager:
     """The reward manager.
@@ -33,6 +37,24 @@ class TreeStructureRewardManager:
             node_uid = data_item.non_tensor_batch['node_uid']
             node_uid2index_list[node_uid].append(index)
 
+        # When explicitly enabled, TreeHCA treats allocation pruning as a
+        # censored rollout once a full-score leaf exists in the same ancestor
+        # subtree. Stop that leaf at the first such ancestor so it affects
+        # neither the ancestor reward nor the averaging denominator. The
+        # default and other algorithms retain the original tree reward
+        # semantics; turn-limit leaves are never classified as premature.
+        estimator = self.config.algorithm.get('adv_estimator', None)
+        treehca_config = self.config.algorithm.get('treehca', {})
+        filter_premature_leaves = treehca_config.get('filter_premature_leaves', False)
+        if estimator == 'treehca' and filter_premature_leaves:
+            leaf_filter = PrematureLeafFilter.from_rows(
+                data.non_tensor_batch['node_uid'],
+                data.non_tensor_batch['parent_node_uid'],
+                data.non_tensor_batch.get('termination_reason'),
+            )
+        else:
+            leaf_filter = PrematureLeafFilter.from_rows([], [])
+
         # the reward of a node equals to the average rewards of the leaf nodes in the corresponding subtree. (since the reward of a non-leaf node is 0(search datasets))        
         data.non_tensor_batch['subtree_traj_num'] = np.zeros_like(data.non_tensor_batch['is_terminal'], dtype=np.int32)
         data.non_tensor_batch['subtree_traj_depths'] = np.zeros_like(data.non_tensor_batch['is_terminal'], dtype=np.float32)
@@ -46,6 +68,14 @@ class TreeStructureRewardManager:
                 cur = node_uid2index_list.get(data.non_tensor_batch['parent_node_uid'][i], [])
                 # go up along the (tree)DAG edges
                 while len(cur) > 0:
+                    # Every row in ``cur`` is a duplicate of the same logical
+                    # node, so one check stops propagation through that node and
+                    # all of its (also protected) ancestors.
+                    if leaf_filter.stops(
+                        data.non_tensor_batch['node_uid'][i],
+                        data.non_tensor_batch['node_uid'][cur[0]],
+                    ):
+                        break
                     nex = []
                     for index in cur:
                         data.non_tensor_batch['subtree_traj_num'][index] += 1

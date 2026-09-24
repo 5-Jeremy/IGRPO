@@ -32,6 +32,7 @@ from collections import defaultdict
 import numpy as np
 import torch
 
+from treehca.premature_leaf_filter import PrematureLeafFilter
 from verl.trainer.ppo.core_algos import compute_grpo_outcome_advantage
 
 
@@ -149,6 +150,8 @@ def compute_treehca_outcome_advantage(token_level_rewards: torch.Tensor,
                                       is_terminal: np.ndarray,
                                       info_gain_sum: np.ndarray,
                                       traj_step: np.ndarray,
+                                      termination_reason: np.ndarray | None = None,
+                                      filter_premature_leaves: bool = False,
                                       prob_diff_mode: bool = True,
                                       prob_floor: float = 1e-6,
                                       weight_temp: float = 1.0,
@@ -167,6 +170,11 @@ def compute_treehca_outcome_advantage(token_level_rewards: torch.Tensor,
         is_terminal: leaf flag from the rollout, used for diagnostics only
         info_gain_sum: p_gt (or log p_gt) of the node, see :func:`_gt_prob`
         traj_step: tree depth of the node, used to walk the DAG bottom-up
+        termination_reason: rollout stop classification used when
+            ``filter_premature_leaves`` is enabled
+        filter_premature_leaves: remove ``pruned`` leaves from backups at
+            ancestors containing a ``success`` leaf. Disabled by default;
+            ``turn_limit`` leaves continue to propagate when enabled
         subtree_size_weight: scale w_c by the number of leaves under child c, so
             the backup matches IGRPO's flat mean over subtree leaves
         leaf_baseline: "group" for a GRPO-style baseline over the leaves of a
@@ -195,30 +203,52 @@ def compute_treehca_outcome_advantage(token_level_rewards: torch.Tensor,
                 children[parent].append(node)
 
         leaves = [node for node in row_of if len(children[node]) == 0]
+        leaf_filter = (
+            PrematureLeafFilter.from_rows(node_uid, parent_node_uid, termination_reason)
+            if filter_premature_leaves
+            else PrematureLeafFilter.from_rows([], [])
+        )
 
         node_adv = {}
+        unpruned_node_adv = {}
         if leaf_baseline == "group":
             group_scores = defaultdict(list)
+            unpruned_group_scores = defaultdict(list)
             for node in leaves:
                 group_scores[uid[row_of[node]]].append(scores[row_of[node]])
-            group_mean, group_std = {}, {}
-            for group, group_score in group_scores.items():
-                stacked = torch.stack(group_score)
-                if len(group_score) > 1:
-                    group_mean[group] = stacked.mean()
-                    group_std[group] = stacked.std()
-                else:
-                    group_mean[group] = torch.zeros_like(stacked[0])
-                    group_std[group] = torch.ones_like(stacked[0])
+                if node not in leaf_filter.premature_leaves:
+                    unpruned_group_scores[uid[row_of[node]]].append(scores[row_of[node]])
+
+            def group_stats(grouped_scores):
+                means, stds = {}, {}
+                for group, group_score in grouped_scores.items():
+                    stacked = torch.stack(group_score)
+                    if len(group_score) > 1:
+                        means[group] = stacked.mean()
+                        stds[group] = stacked.std()
+                    else:
+                        means[group] = torch.zeros_like(stacked[0])
+                        stds[group] = torch.ones_like(stacked[0])
+                return means, stds
+
+            group_mean, group_std = group_stats(group_scores)
+            unpruned_group_mean, unpruned_group_std = group_stats(unpruned_group_scores)
             for node in leaves:
                 i = row_of[node]
                 advantage = scores[i] - group_mean[uid[i]]
                 if norm_adv_by_std:
                     advantage = advantage / (group_std[uid[i]] + eps)
                 node_adv[node] = advantage
+                if node not in leaf_filter.premature_leaves:
+                    clean_advantage = scores[i] - unpruned_group_mean[uid[i]]
+                    if norm_adv_by_std:
+                        clean_advantage = clean_advantage / (unpruned_group_std[uid[i]] + eps)
+                    unpruned_node_adv[node] = clean_advantage
         elif leaf_baseline == "none":
             for node in leaves:
                 node_adv[node] = scores[row_of[node]]
+                if node not in leaf_filter.premature_leaves:
+                    unpruned_node_adv[node] = node_adv[node]
         else:
             raise ValueError(f"Invalid leaf_baseline: {leaf_baseline}, expected one of ['group', 'none']")
 
@@ -228,12 +258,14 @@ def compute_treehca_outcome_advantage(token_level_rewards: torch.Tensor,
         internal.sort(key=lambda node: -int(traj_step[row_of[node]]))
 
         subtree_leaves = {node: 1 for node in leaves}
+        unpruned_subtree_leaves = {
+            node: int(node not in leaf_filter.premature_leaves) for node in leaves
+        }
 
         ess_ratios = []
         degenerate_weights = 0
-        for node in internal:
-            child_nodes = children[node]
-            subtree_leaves[node] = sum(subtree_leaves[child] for child in child_nodes)
+
+        def combine(child_nodes, values, leaf_counts):
             weights = np.array(
                 [1.0 / _gt_prob(info_gain_sum[row_of[child]], prob_diff_mode, prob_floor) for child in child_nodes],
                 dtype=np.float64,
@@ -243,23 +275,45 @@ def compute_treehca_outcome_advantage(token_level_rewards: torch.Tensor,
             if subtree_size_weight:
                 # a child standing in for many leaves speaks for all of them, as it
                 # would under IGRPO's path unrolling
-                weights = weights * np.array([subtree_leaves[child] for child in child_nodes], dtype=np.float64)
+                weights = weights * np.array([leaf_counts[child] for child in child_nodes], dtype=np.float64)
             if max_weight_ratio > 0:
                 # truncated importance sampling, caps a single child's influence
                 weights = np.minimum(weights, max_weight_ratio * weights.mean())
             total = weights.sum()
+            degenerate = False
             if not np.isfinite(total) or total <= 0.0:
                 weights = np.ones_like(weights)
                 total = weights.sum()
-                degenerate_weights += 1
+                degenerate = True
             weights = weights / total
 
             advantage = None
             for weight, child in zip(weights, child_nodes):
-                term = node_adv[child] * float(weight)
+                term = values[child] * float(weight)
                 advantage = term if advantage is None else advantage + term
-            node_adv[node] = advantage
-            ess_ratios.append(1.0 / (float(np.sum(weights ** 2)) * len(child_nodes)))
+            ess = 1.0 / (float(np.sum(weights ** 2)) * len(child_nodes))
+            return advantage, ess, degenerate
+
+        for node in internal:
+            child_nodes = children[node]
+            subtree_leaves[node] = sum(subtree_leaves[child] for child in child_nodes)
+            unpruned_subtree_leaves[node] = sum(unpruned_subtree_leaves[child] for child in child_nodes)
+
+            clean_children = [child for child in child_nodes if unpruned_subtree_leaves[child] > 0]
+            if clean_children:
+                clean_advantage, clean_ess, clean_degenerate = combine(
+                    clean_children, unpruned_node_adv, unpruned_subtree_leaves
+                )
+                unpruned_node_adv[node] = clean_advantage
+
+            if node in leaf_filter.protected_ancestors:
+                # A successful descendant guarantees at least one clean child.
+                node_adv[node] = unpruned_node_adv[node]
+                ess, degenerate = clean_ess, clean_degenerate
+            else:
+                node_adv[node], ess, degenerate = combine(child_nodes, node_adv, subtree_leaves)
+            ess_ratios.append(ess)
+            degenerate_weights += int(degenerate)
 
         node_advantages = torch.zeros_like(scores)
         for i in range(bs):
@@ -281,6 +335,10 @@ def compute_treehca_outcome_advantage(token_level_rewards: torch.Tensor,
         "treehca/snis_ess_ratio": float(np.mean(ess_ratios)) if ess_ratios else 1.0,
         "treehca/degenerate_weight_count": float(degenerate_weights),
         "treehca/leaf_without_terminal_flag": float(non_terminal_leaves),
+        "treehca/premature_leaf_filter/enabled": float(filter_premature_leaves),
+        "treehca/premature_leaf_filter/pruned_leaf_count": float(len(leaf_filter.premature_leaves)),
+        "treehca/premature_leaf_filter/full_score_leaf_count": float(len(leaf_filter.full_score_leaves)),
+        "treehca/premature_leaf_filter/protected_ancestor_count": float(len(leaf_filter.protected_ancestors)),
         "treehca/leaf_adv/mean": node_advantages[leaf_rows].mean().item() if leaf_rows else 0.0,
         "treehca/internal_adv/mean": node_advantages[internal_rows].mean().item() if internal_rows else 0.0,
         "treehca/internal_adv/abs_mean": node_advantages[internal_rows].abs().mean().item() if internal_rows else 0.0,
@@ -297,6 +355,8 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
                                         is_terminal: np.ndarray,
                                         info_gain_sum: np.ndarray,
                                         traj_step: np.ndarray,
+                                        termination_reason: np.ndarray | None = None,
+                                        filter_premature_leaves: bool = False,
                                         prob_diff_mode: bool = True,
                                         prob_floor: float = 1e-6,
                                         max_inv_ratio: float = 2.0,
@@ -333,6 +393,10 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
 
     Q(parent) is the mean of its children, so this sums to zero over every sibling set
     by construction rather than approximately, at the cost of no longer using p_gt.
+    At a protected parent, both sides of the residual use the pruned-leaf-free Q:
+    an all-pruned child subtree receives zero on the crossing edge, while retained
+    child residuals still sum to zero. Ordinary Q residuals remain in use below that
+    boundary so the incomplete rollout can still provide local supervision.
 
     Roots get no auxiliary term under either form. P(gold | question) is never measured,
     so there is no prior for the first turn to be scored against, and a root has no
@@ -345,6 +409,10 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
         q_weight: coefficient on the auxiliary term. The two are independent, so they
             need not sum to 1: 0.7/0.3 is a convex blend favouring GRPO, 1.0/1.0 adds
             the aux term at full strength on top of an unscaled GRPO advantage
+        termination_reason: rollout stop classification used when
+            ``filter_premature_leaves`` is enabled
+        filter_premature_leaves: enable the premature-leaf filter shared with
+            the SNIS backup; disabled by default
 
     Returns:
         advantages / returns: `(torch.Tensor)` shape (bs, response_length)
@@ -384,15 +452,32 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
             if parent in node_rows:
                 children[parent].append(node)
 
-        # Q backup: a leaf keeps its outcome reward, a parent averages its children.
-        # Deepest first, so every child is resolved before its parent is read.
+        leaf_filter = (
+            PrematureLeafFilter.from_rows(node_uid, parent_node_uid, termination_reason)
+            if filter_premature_leaves
+            else PrematureLeafFilter.from_rows([], [])
+        )
+
+        # Keep a second, pruned-leaf-free value for every subtree. A protected
+        # ancestor uses that value; an unprotected branch retains its original Q
+        # so the pruned leaf can still provide local supervision.
         q = {}
+        unpruned_q = {}
         for node in sorted(row_of, key=lambda n: -int(traj_step[row_of[n]])):
             child_nodes = children[node]
             if child_nodes:
-                q[node] = sum(q[child] for child in child_nodes) / len(child_nodes)
+                clean_values = [unpruned_q[child] for child in child_nodes if child in unpruned_q]
+                if clean_values:
+                    unpruned_q[node] = sum(clean_values) / len(clean_values)
+                if node in leaf_filter.protected_ancestors:
+                    # A successful descendant guarantees a clean value.
+                    q[node] = unpruned_q[node]
+                else:
+                    q[node] = sum(q[child] for child in child_nodes) / len(child_nodes)
             else:
                 q[node] = float(scores[row_of[node]])
+                if node not in leaf_filter.premature_leaves:
+                    unpruned_q[node] = q[node]
 
         node_aux = {}
         factors, clipped, roots = [], 0, 0
@@ -405,7 +490,18 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
                 roots += 1
                 continue
             if aux_mode == "td":
-                node_aux[node] = q[node] - q[parent]
+                if parent in leaf_filter.protected_ancestors:
+                    # The protected parent's Q is a mean over clean children only.
+                    # Use that same population for its TD edges: an all-pruned
+                    # child stops here, while eligible sibling residuals remain
+                    # exactly zero-sum around their clean parent mean.
+                    node_aux[node] = (
+                        unpruned_q[node] - unpruned_q[parent]
+                        if node in unpruned_q
+                        else 0.0
+                    )
+                else:
+                    node_aux[node] = q[node] - q[parent]
                 continue
             p = _gt_prob(info_gain_sum[i], prob_diff_mode, prob_floor)
             p_parent = _gt_prob(info_gain_sum[row_of[parent]], prob_diff_mode, prob_floor)
@@ -440,6 +536,10 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
         "treehca/hindsight_factor/mean": float(np.mean(factors)) if factors else 0.0,
         "treehca/hindsight_factor/neg_frac": float(np.mean([f < 0 for f in factors])) if factors else 0.0,
         "treehca/hindsight_factor/clipped_frac": float(clipped) / max(len(row_of), 1),
+        "treehca/premature_leaf_filter/enabled": float(filter_premature_leaves),
+        "treehca/premature_leaf_filter/pruned_leaf_count": float(len(leaf_filter.premature_leaves)),
+        "treehca/premature_leaf_filter/full_score_leaf_count": float(len(leaf_filter.full_score_leaves)),
+        "treehca/premature_leaf_filter/protected_ancestor_count": float(len(leaf_filter.protected_ancestors)),
         # post-blend, so the two are directly comparable as contributions to the loss
         "treehca/grpo_adv/abs_mean": grpo_term.abs().mean().item(),
         "treehca/aux_adv/abs_mean": aux_term.abs().mean().item(),

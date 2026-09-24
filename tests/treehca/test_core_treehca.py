@@ -1,8 +1,9 @@
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 
-from treehca.core_treehca import cap_no_progress_advantages
+from treehca.core_treehca import cap_no_progress_advantages, compute_treehca_outcome_advantage, compute_treehca_q_outcome_advantage
 from verl import DataProto
 from verl.utils.advantage_estimator import AdvantageEstimator
 
@@ -134,3 +135,196 @@ def test_rejects_invalid_thresholds(turns_threshold, info_gain_threshold):
             turns_threshold=turns_threshold,
             info_gain_threshold=info_gain_threshold,
         )
+
+
+def _mixed_leaf_tree():
+    """A pruned branch, a full-score leaf, and a turn-limit leaf."""
+    return {
+        "token_level_rewards": torch.tensor([[0.0], [0.0], [2.0], [10.0], [4.0]]),
+        "response_mask": torch.ones(5, 1),
+        "uid": np.asarray(["group"] * 5, dtype=object),
+        "node_uid": np.asarray(["root", "branch", "pruned", "success", "limited"], dtype=object),
+        "parent_node_uid": np.asarray(["outside", "root", "branch", "root", "root"], dtype=object),
+        "is_terminal": np.asarray([False, False, True, True, True]),
+        "termination_reason": np.asarray([None, None, "pruned", "success", "turn_limit"], dtype=object),
+        "info_gain_sum": np.ones(5),
+        "traj_step": np.asarray([0, 1, 2, 1, 1]),
+    }
+
+
+def test_premature_leaf_filter_defaults_off():
+    advantages, _, metrics = compute_treehca_outcome_advantage(
+        **_mixed_leaf_tree(),
+        leaf_baseline="none",
+    )
+
+    # With the option omitted, all three root branches propagate as before.
+    assert advantages.squeeze(-1).tolist() == pytest.approx([16.0 / 3.0, 2.0, 2.0, 10.0, 4.0])
+    assert metrics["treehca/premature_leaf_filter/enabled"] == 0
+    assert metrics["treehca/premature_leaf_filter/pruned_leaf_count"] == 0
+
+    q_advantages, _, q_metrics = compute_treehca_q_outcome_advantage(
+        **_mixed_leaf_tree(),
+        grpo_weight=0.0,
+        q_weight=1.0,
+        aux_mode="td",
+    )
+    assert q_advantages.squeeze(-1).tolist() == pytest.approx(
+        [0.0, -10.0 / 3.0, 0.0, 14.0 / 3.0, -4.0 / 3.0]
+    )
+    assert q_metrics["treehca/premature_leaf_filter/enabled"] == 0
+
+
+def test_snis_stops_pruned_leaf_at_successful_ancestor_but_keeps_turn_limit_leaf():
+    advantages, returns, metrics = compute_treehca_outcome_advantage(
+        **_mixed_leaf_tree(),
+        leaf_baseline="none",
+        filter_premature_leaves=True,
+    )
+
+    # The pruned leaf still trains itself and its private branch. At root its
+    # branch is omitted, while the turn-limit score remains: (10 + 4) / 2 = 7.
+    expected = [[7.0], [2.0], [2.0], [10.0], [4.0]]
+    assert advantages.tolist() == expected
+    assert returns.tolist() == expected
+    assert metrics["treehca/premature_leaf_filter/enabled"] == 1
+    assert metrics["treehca/premature_leaf_filter/pruned_leaf_count"] == 1
+    assert metrics["treehca/premature_leaf_filter/full_score_leaf_count"] == 1
+    assert metrics["treehca/premature_leaf_filter/protected_ancestor_count"] == 1
+
+
+def test_q_backup_stops_pruned_leaf_at_successful_ancestor_but_keeps_turn_limit_leaf():
+    advantages, _, _ = compute_treehca_q_outcome_advantage(
+        **_mixed_leaf_tree(),
+        grpo_weight=0.0,
+        q_weight=1.0,
+        aux_mode="td",
+        filter_premature_leaves=True,
+    )
+
+    # Q(root)=7 after the same filtering. The all-pruned branch gets zero on
+    # the protected crossing instead of an uncompensated 2 - 7 residual. The
+    # two eligible child residuals remain zero-sum: (10 - 7) + (4 - 7) = 0.
+    values = advantages.squeeze(-1).tolist()
+    assert values == pytest.approx([0.0, 0.0, 0.0, 3.0, -3.0])
+    assert sum(values[i] for i in (1, 3, 4)) == pytest.approx(0.0)
+
+
+def test_q_backup_keeps_local_td_signal_below_filtered_crossing():
+    tree = {
+        "token_level_rewards": torch.tensor([[0.0], [0.0], [2.0], [4.0], [10.0], [4.0]]),
+        "response_mask": torch.ones(6, 1),
+        "uid": np.asarray(["group"] * 6, dtype=object),
+        "node_uid": np.asarray(["root", "branch", "pruned-a", "pruned-b", "success", "limited"], dtype=object),
+        "parent_node_uid": np.asarray(["outside", "root", "branch", "branch", "root", "root"], dtype=object),
+        "is_terminal": np.asarray([False, False, True, True, True, True]),
+        "termination_reason": np.asarray([None, None, "pruned", "pruned", "success", "turn_limit"], dtype=object),
+        "info_gain_sum": np.ones(6),
+        "traj_step": np.asarray([0, 1, 2, 2, 1, 1]),
+    }
+
+    advantages, _, _ = compute_treehca_q_outcome_advantage(
+        **tree,
+        grpo_weight=0.0,
+        q_weight=1.0,
+        aux_mode="td",
+        filter_premature_leaves=True,
+    )
+
+    # The all-pruned branch stops at root, but its internal Q mean remains 3,
+    # preserving the useful local residuals 2 - 3 and 4 - 3.
+    assert advantages.squeeze(-1).tolist() == pytest.approx([0.0, 0.0, -1.0, 1.0, 3.0, -3.0])
+
+
+def test_pruned_leaf_propagates_normally_without_a_full_score_descendant():
+    inputs = _mixed_leaf_tree()
+    keep = np.asarray([0, 2, 4])
+    inputs = {
+        key: value[torch.as_tensor(keep)] if isinstance(value, torch.Tensor) else value[keep]
+        for key, value in inputs.items()
+    }
+    inputs["parent_node_uid"] = np.asarray(["outside", "root", "root"], dtype=object)
+    inputs["traj_step"] = np.asarray([0, 1, 1])
+
+    advantages, _, metrics = compute_treehca_outcome_advantage(
+        **inputs,
+        leaf_baseline="none",
+        filter_premature_leaves=True,
+    )
+
+    assert advantages.squeeze(-1).tolist() == pytest.approx([3.0, 2.0, 4.0])
+    assert metrics["treehca/premature_leaf_filter/protected_ancestor_count"] == 0
+
+
+def test_tree_reward_manager_excludes_pruned_leaf_from_protected_ancestor_average():
+    from types import SimpleNamespace
+
+    from agent_system.reward_manager.tree_structure import TreeStructureRewardManager
+
+    tree = _mixed_leaf_tree()
+    batch = DataProto.from_dict(
+        tensors={
+            "prompts": torch.ones(5, 1, dtype=torch.long),
+            "responses": torch.ones(5, 1, dtype=torch.long),
+            "attention_mask": torch.ones(5, 2, dtype=torch.long),
+        },
+        non_tensors={
+            "node_uid": tree["node_uid"],
+            "parent_node_uid": tree["parent_node_uid"],
+            "is_terminal": tree["is_terminal"],
+            "termination_reason": tree["termination_reason"],
+            "traj_step": tree["traj_step"],
+            "current_tool_callings": np.zeros(5, dtype=np.float32),
+            "rewards": np.asarray([0.0, 0.0, 2.0, 10.0, 4.0], dtype=np.float32),
+            "data_source": np.asarray(["test"] * 5, dtype=object),
+        },
+    )
+    config = OmegaConf.create(
+        {
+            "algorithm": {
+                "adv_estimator": "treehca",
+                "igrpo": {"reward_mode": "avg"},
+                "treehca": {"filter_premature_leaves": True},
+            }
+        }
+    )
+    tokenizer = SimpleNamespace(decode=lambda *args, **kwargs: "")
+
+    rewards = TreeStructureRewardManager(tokenizer, 0, config)(batch)
+
+    assert rewards.squeeze(-1).tolist() == pytest.approx([7.0, 2.0, 2.0, 10.0, 4.0])
+    assert batch.non_tensor_batch["subtree_traj_num"].tolist() == [2, 1, 1, 1, 1]
+
+
+def test_tree_reward_manager_premature_leaf_filter_defaults_off():
+    from types import SimpleNamespace
+
+    from agent_system.reward_manager.tree_structure import TreeStructureRewardManager
+
+    tree = _mixed_leaf_tree()
+    batch = DataProto.from_dict(
+        tensors={
+            "prompts": torch.ones(5, 1, dtype=torch.long),
+            "responses": torch.ones(5, 1, dtype=torch.long),
+            "attention_mask": torch.ones(5, 2, dtype=torch.long),
+        },
+        non_tensors={
+            "node_uid": tree["node_uid"],
+            "parent_node_uid": tree["parent_node_uid"],
+            "is_terminal": tree["is_terminal"],
+            "termination_reason": tree["termination_reason"],
+            "traj_step": tree["traj_step"],
+            "current_tool_callings": np.zeros(5, dtype=np.float32),
+            "rewards": np.asarray([0.0, 0.0, 2.0, 10.0, 4.0], dtype=np.float32),
+            "data_source": np.asarray(["test"] * 5, dtype=object),
+        },
+    )
+    config = OmegaConf.create(
+        {"algorithm": {"adv_estimator": "treehca", "igrpo": {"reward_mode": "avg"}}}
+    )
+    tokenizer = SimpleNamespace(decode=lambda *args, **kwargs: "")
+
+    rewards = TreeStructureRewardManager(tokenizer, 0, config)(batch)
+
+    assert rewards.squeeze(-1).tolist() == pytest.approx([16.0 / 3.0, 2.0, 2.0, 10.0, 4.0])
+    assert batch.non_tensor_batch["subtree_traj_num"].tolist() == [3, 1, 1, 1, 1]
