@@ -280,5 +280,8 @@ Each method's `run_math.sh` keeps the training settings from its
 `run_search_7b.sh` recipe. The math environment exposes the Python tool and
 runs without a retriever. The terminal reward is 0.1 after a Python call plus
 0.9 for a correct boxed answer; a trajectory with no Python call scores zero.
+With 4,999 training rows and a batch size of 256, six epochs allow 114 full
+batches. Each math run stops after 100 updates and saves one checkpoint at
+`data/runs/MATH/<method>/checkpoints/global_step_100`.
 The Python tool limits execution time, memory, code length, and output, but its
 subprocess is not isolated from local files or the network.
