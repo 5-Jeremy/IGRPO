@@ -130,15 +130,15 @@ def test_deferred_records_survive_reward_collation_and_training_metrics(reward_m
             current_tool_callings=np.float32(0),
             data_source="webshop",
         )
-    config = OmegaConf.create({"env": {"max_steps": 3}, "algorithm": {"igrpo": {"stable_steps": 150, "stable_method": "normal", "reward_mode": reward_mode}}})
+    config = OmegaConf.create({"env": {"max_steps": 3}, "algorithm": {"adv_estimator": "treehca", "igrpo": {"prob_diff_mode": prob_diff_mode, "reward_mode": reward_mode}}})
     tokenizer = SimpleNamespace(decode=lambda *args, **kwargs: "")
     collector = TrajectoryCollector(config, tokenizer)
-    batch = collector.gather_rollout_data_tree_structure(rows, {"success_rate": np.asarray([0.0])}, global_steps=0)
+    batch = collector.gather_rollout_data_tree_structure(rows, {"success_rate": np.asarray([0.0])}, global_steps=0, full_success_reward=10.0)
     reward = TreeStructureRewardManager(tokenizer, 0, config)(batch)
     batch.batch["token_level_scores"] = reward
     batch.batch["token_level_rewards"] = reward
     metrics = compute_data_metrics(batch, use_critic=False)
-    expected_reward = 0.125 if prob_diff_mode else math.log(0.25) * 0.5
+    expected_reward = 2.5
     assert metrics["episode/reward/mean"] == pytest.approx(expected_reward / 2)
     assert metrics["episode/reward/max"] == pytest.approx(max(0, expected_reward))
     assert metrics["episode/reward/min"] == pytest.approx(min(0, expected_reward))
@@ -152,7 +152,7 @@ def test_collector_updates_archived_parent_before_using_child_gains(monkeypatch,
 
     config = OmegaConf.create(
         {
-            "algorithm": {"adv_estimator": "treehca", "treehca": {"prob_floor": 1e-6}, "igrpo": {"prob_diff_mode": prob_diff_mode, "gamma": 1, "max_traj_to_expand_per_node": 2, "expand_mode": "full"}},
+            "algorithm": {"adv_estimator": "treehca", "treehca": {"prob_floor": 1e-6}, "igrpo": {"prob_diff_mode": prob_diff_mode, "gamma": 1, "expand_score": "info_val", "max_traj_to_expand_per_node": 2, "expand_mode": "full"}},
             "env": {"env_name": "Webshop", "max_steps": 2, "rollout": {"n": 2}},
             "data": {"max_prompt_length": 32, "max_response_length": 8},
             "actor_rollout_ref": {"rollout": {}},

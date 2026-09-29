@@ -140,10 +140,13 @@ computation. It is not an untouched copy of the immediate environment reward:
 1. The WebShop worker converts a terminal full-credit purchase to **10**, and all
    other outcomes to **0**. The original WebShop partial-credit score is a
    separate `task_score` in environment info.
-2. Rollout gathering replaces a pruned node's reward with `info_gain_sum * 0.5`
-   while `global_steps <= stable_steps`, and `info_gain_sum` afterward. With
-   `stable_method='threshold'`, the later value becomes 1 if `info_gain_sum >= 0.5`
-   and 0 otherwise.
+2. For TreeHCA, rollout gathering replaces a pruned leaf's reward with the
+   environment's full-success reward multiplied by its ground-truth success
+   probability (`info_gain_sum`). In log-probability mode, it exponentiates
+   `info_gain_sum` first. Search uses a full-success reward of 1; WebShop uses 10.
+   Other environments provide their own scale or use a successful terminal
+   reward from the current rollout. IGRPO keeps its existing training-step
+   dependent pruned-node reward.
 3. The tree reward manager updates internal-node rewards from terminal descendants:
    maximum in `reward_mode='max'` (the current WebShop launcher), or average in
    `reward_mode='avg'`. Terminal nodes retain their own rewards.

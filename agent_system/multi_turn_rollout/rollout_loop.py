@@ -294,6 +294,7 @@ class TrajectoryCollector:
             total_batch_list: List[Dict],
             success: Dict[str, np.ndarray],
             global_steps: int,
+            full_success_reward: float | None = None,
             ) -> DataProto:
         """
         Returns:
@@ -304,6 +305,13 @@ class TrajectoryCollector:
         for key, value in success.items():
             success_rate[key] = np.mean(value)
 
+        if self.config.algorithm.adv_estimator == AdvantageEstimator.TREEHCA and any(data['deactivate'] for data in total_batch_list):
+            if full_success_reward is None:
+                successful_rewards = [float(data['rewards']) for data in total_batch_list if data.get('termination_reason') == 'success']
+                if not successful_rewards:
+                    raise ValueError('TreeHCA needs the environment full-success reward to score pruned leaves')
+                full_success_reward = max(successful_rewards)
+
         for data in total_batch_list:
             # add success_rate
             for key, value in success_rate.items():
@@ -311,12 +319,18 @@ class TrajectoryCollector:
             # add info gain to reward for those deactivate nodes
             if data['deactivate'] == True:
                 assert data['traj_step'] < self.config.env.max_steps - 1
-                # balance between exploration and exploitation
-                multi = 0.5 if global_steps <= self.config.algorithm.igrpo.stable_steps else 1.0
-                base = data['info_gain_sum']
-                if global_steps > self.config.algorithm.igrpo.stable_steps and self.config.algorithm.igrpo.stable_method == 'threshold':
-                    base = np.float32(1.0) if base >= 0.5 else np.float32(0.0)
-                data['rewards'] = base * multi
+                if self.config.algorithm.adv_estimator == AdvantageEstimator.TREEHCA:
+                    gt_prob = data['info_gain_sum']
+                    if not self.config.algorithm.igrpo.prob_diff_mode:
+                        gt_prob = np.exp(gt_prob)
+                    data['rewards'] = full_success_reward * gt_prob
+                else:
+                    # Preserve IGRPO's training-step-dependent pruning reward.
+                    multi = 0.5 if global_steps <= self.config.algorithm.igrpo.stable_steps else 1.0
+                    base = data['info_gain_sum']
+                    if global_steps > self.config.algorithm.igrpo.stable_steps and self.config.algorithm.igrpo.stable_method == 'threshold':
+                        base = np.float32(1.0) if base >= 0.5 else np.float32(0.0)
+                    data['rewards'] = base * multi
                 
         if self.config.algorithm.igrpo.reward_mode == 'full':
             # From every terminal_node, we go up to obtain a full trajectory.
@@ -934,7 +948,8 @@ class TrajectoryCollector:
             gen_batch_output: DataProto = self.gather_rollout_data_tree_structure(
                 total_batch_list=total_batch_list,
                 success=total_success,
-                global_steps=gen_batch.meta_info["global_steps"]
+                global_steps=gen_batch.meta_info["global_steps"],
+                full_success_reward=getattr(envs, 'full_success_reward', None) if self.config.algorithm.adv_estimator == AdvantageEstimator.TREEHCA else None,
             )
             if self._webshop_scorer_metrics is not None:
                 gen_batch_output.meta_info["webshop_scorer_metrics"] = self._webshop_scorer_metrics

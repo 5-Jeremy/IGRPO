@@ -43,9 +43,9 @@ def set_gamefile(infos, gamefile):
 
 
 class SearchEnvironmentManager(EnvironmentManagerBase):
-    """
-    EnvironmentManager for SearchEnv.
-    """
+    """EnvironmentManager for SearchEnv."""
+
+    full_success_reward = 1.0
     def __init__(self, envs, projection_f, config):
         self.memory = SearchMemory()
         super().__init__(envs, projection_f, config)
@@ -146,6 +146,10 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
             
 
 class AlfWorldEnvironmentManager(EnvironmentManagerBase):
+    @property
+    def full_success_reward(self):
+        return 11.0 if self.envs.multi_modal else 10.0
+
     def __init__(self, envs, projection_f, config):
         self.memory = SimpleMemory()
         super().__init__(envs, projection_f, config)
@@ -398,6 +402,8 @@ class GymCardEnvironmentManager(EnvironmentManagerBase):
 
 
 class WebshopEnvironmentManager(EnvironmentManagerBase):
+    full_success_reward = 10.0
+
     def __init__(self, envs, projection_f, config):
         self.memory = SimpleMemory()
         super().__init__(envs, projection_f, config)
@@ -535,6 +541,8 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
                 return
 
 class AppWorldEnvironmentManager(EnvironmentManagerBase):
+    full_success_reward = 10.0
+
     def __init__(self, envs, projection_f, config):
         self.memory = SimpleMemory()
         super().__init__(envs, projection_f, config)
