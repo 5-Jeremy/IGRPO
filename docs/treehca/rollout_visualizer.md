@@ -44,8 +44,9 @@ records remain individually accessible through Previous/Next record buttons,
 shown only for nodes with multiple records. Graph labels and
 colors use the first saved record.
 
-The details pane also hides the token arrays `advantages`, `values`, and
-`webshop_session_id`; scalar `advantage` and `value` remain visible. Double-click
+The details pane also hides the token arrays `advantages`, `grpo_advantages`,
+`auxiliary_advantages`, `values`, and `webshop_session_id`; scalar
+`advantage`, `grpo_advantage`, `auxiliary_advantage`, and `value` remain visible. Double-click
 a field name to pin it at the top, in pinning order; double-click again to unpin.
 Pinned names have a star and a blue background. Keyboard users can focus a field
 name and press Enter or Space to toggle its pin. Pins survive node, tree, and file changes
@@ -104,6 +105,8 @@ metadata. Existing logs cannot recover fields that were never saved.
 | `webshop_task_id`, `webshop_session_id` | Original reset task index and session before the action, preserved through forks. Native purchase auto-reset therefore cannot substitute a new session ID. |
 | `values`, `advantages` | Training tensor values for response positions selected by `response_mask`, in token order, excluding masked positions. |
 | `value`, `advantage` | Means of those unmasked token values, for compact display and metric coloring. |
+| `grpo_advantages`, `auxiliary_advantages` | For Q credit assignment, unweighted GRPO and auxiliary advantages at unmasked response positions. |
+| `grpo_advantage`, `auxiliary_advantage` | Per-node means of those unweighted components, available in node details and as color metrics. |
 | `is_action_valid`, `rewards` | Saved action-validity flag and final shaped/aggregated reward in the training batch (see below). |
 
 TreeHCA normally has no critic, so `values` and `value` are null rather than

@@ -356,13 +356,17 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 **tree_kwargs,
             )
         elif treehca_credit == "q_hindsight":
+            # Keep the raw components for per-node rollout diagnostics.
+            component_advantages = {}
             advantages, returns, treehca_metrics = core_treehca.compute_treehca_q_outcome_advantage(
+                component_advantages=component_advantages,
                 max_inv_ratio=kwargs.get("treehca_max_inv_ratio", 2.0),
                 grpo_weight=kwargs.get("treehca_grpo_weight", 0.7),
                 q_weight=kwargs.get("treehca_q_weight", 0.3),
                 aux_mode=kwargs.get("treehca_aux_mode", "hindsight"),
                 **tree_kwargs,
             )
+            data.batch.update(component_advantages)
         else:
             raise ValueError(f"Invalid treehca.credit: {treehca_credit}, expected one of ['snis', 'q_hindsight']")
         if kwargs.get("treehca_no_progress_advantage_cap", False):

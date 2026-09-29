@@ -129,6 +129,18 @@ def build_rollout_fields(non_tensor_batch, tensor_batch=None):
                 tokens = tensor[i][mask[i]]
                 fields[source][i] = _json_value(tokens.tolist())
                 fields[summary][i] = _json_value(tokens.float().mean().item()) if tokens.numel() else None
+    # Q credit assignment stores its unweighted components only when available.
+    for source, summary in (("grpo_advantages", "grpo_advantage"), ("auxiliary_advantages", "auxiliary_advantage")):
+        if tensor_batch is None or source not in tensor_batch:
+            continue
+        mask = tensor_batch["response_mask"].detach().cpu().bool()
+        tensor = tensor_batch[source].detach().cpu()
+        fields[source] = []
+        fields[summary] = []
+        for i in range(len(node_uids)):
+            tokens = tensor[i][mask[i]]
+            fields[source].append(_json_value(tokens.tolist()))
+            fields[summary].append(_json_value(tokens.float().mean().item()) if tokens.numel() else None)
     return fields
 
 

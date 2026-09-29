@@ -363,7 +363,8 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
                                         grpo_weight: float = 0.7,
                                         q_weight: float = 0.3,
                                         aux_mode: str = "hindsight",
-                                        norm_adv_by_std: bool = True):
+                                        norm_adv_by_std: bool = True,
+                                        component_advantages: dict | None = None):
     """GRPO advantage blended with a hindsight-weighted Q term.
 
         A = grpo_weight * A_grpo + q_weight * A_aux
@@ -413,6 +414,8 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
             ``filter_premature_leaves`` is enabled
         filter_premature_leaves: enable the premature-leaf filter shared with
             the SNIS backup; disabled by default
+        component_advantages: optional output dictionary for the unweighted,
+            response-masked GRPO and auxiliary advantages
 
     Returns:
         advantages / returns: `(torch.Tensor)` shape (bs, response_length)
@@ -520,8 +523,12 @@ def compute_treehca_q_outcome_advantage(token_level_rewards: torch.Tensor,
         for i in range(bs):
             aux[i] = node_aux[node_uid[i]]
 
+        auxiliary_advantages = aux.unsqueeze(-1) * response_mask
+        if component_advantages is not None:
+            component_advantages["grpo_advantages"] = grpo_advantages
+            component_advantages["auxiliary_advantages"] = auxiliary_advantages
         grpo_term = grpo_weight * grpo_advantages
-        aux_term = q_weight * aux.unsqueeze(-1) * response_mask
+        aux_term = q_weight * auxiliary_advantages
         advantages = grpo_term + aux_term
 
     leaves = [node for node in row_of if len(children[node]) == 0]

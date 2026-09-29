@@ -4,7 +4,7 @@ import re
 
 from treehca.product_page_parser import extract_product_page_contexts
 
-HIDDEN_FIELDS = {"input", "node_uid", "parent_node_uid", "parent_uid", "children", "child_uids", "children_uids", "node_path", "uid", "tree_uid", "advantages", "values", "webshop_session_id"}
+HIDDEN_FIELDS = {"input", "node_uid", "parent_node_uid", "parent_uid", "children", "child_uids", "children_uids", "node_path", "uid", "tree_uid", "advantages", "grpo_advantages", "auxiliary_advantages", "values", "webshop_session_id"}
 HIDDEN_COLOR_FIELDS = {"sampled_expansion_count", "branch_logit", "webshop_session_id", "webshop_task_id"}
 PROMPT_FIELDS = ("shopping_task", "history", "current_observation", "available_actions")
 

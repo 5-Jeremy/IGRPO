@@ -385,3 +385,53 @@ def test_tree_reward_manager_premature_leaf_filter_defaults_off():
 
     assert rewards.squeeze(-1).tolist() == pytest.approx([16.0 / 3.0, 2.0, 2.0, 10.0, 4.0])
     assert batch.non_tensor_batch["subtree_traj_num"].tolist() == [3, 1, 1, 1, 1]
+
+
+def test_q_components_reach_rollout_fields_before_weighting(tmp_path):
+    from types import SimpleNamespace
+
+    from treehca.rollout_records import build_rollout_fields
+    from treehca.visualizer.data import load_file
+    from verl.trainer.ppo.ray_trainer import RayPPOTrainer, compute_advantage
+
+    data = DataProto.from_dict(
+        tensors={
+            "token_level_rewards": torch.tensor([[0.0, 0.0], [0.0, 2.0], [0.0, 4.0]]),
+            "response_mask": torch.tensor([[1.0, 0.0]] * 3),
+        },
+        non_tensors={
+            "uid": np.asarray(["group"] * 3, dtype=object),
+            "node_uid": np.asarray(["a", "b", "c"], dtype=object),
+            "parent_node_uid": np.asarray(["root", "a", "a"], dtype=object),
+            "is_terminal": np.asarray([False, True, True]),
+            "info_gain_sum": np.asarray([0.5, 0.5, 0.5]),
+            "traj_step": np.asarray([0, 1, 1]),
+        },
+    )
+    result = compute_advantage(
+        data,
+        AdvantageEstimator.TREEHCA,
+        treehca_credit="q_hindsight",
+        treehca_aux_mode="td",
+        treehca_grpo_weight=0.25,
+        treehca_q_weight=0.5,
+        treehca_norm_adv_by_std=False,
+    )
+    grpo = result.batch["grpo_advantages"]
+    auxiliary = result.batch["auxiliary_advantages"]
+    assert auxiliary[:, 0].tolist() == pytest.approx([0.0, -1.0, 1.0])
+    assert torch.allclose(result.batch["advantages"], 0.25 * grpo + 0.5 * auxiliary)
+    fields = build_rollout_fields(result.non_tensor_batch, result.batch)
+    assert fields["grpo_advantage"] == pytest.approx(grpo[:, 0].tolist())
+    assert fields["auxiliary_advantage"] == pytest.approx([0.0, -1.0, 1.0])
+    assert fields["advantage"] == pytest.approx(result.batch["advantages"][:, 0].tolist())
+    assert fields["grpo_advantages"] == [[value] for value in fields["grpo_advantage"]]
+    assert fields["auxiliary_advantages"] == [[value] for value in fields["auxiliary_advantage"]]
+
+    RayPPOTrainer._dump_generations(
+        SimpleNamespace(global_steps=1), ["p"] * 3, ["o"] * 3,
+        [0.0, 2.0, 4.0], {}, str(tmp_path), rollout_fields=fields,
+    )
+    tree = load_file(tmp_path / "1.jsonl").trees[0]
+    assert tree.nodes["b"].records[0]["auxiliary_advantage"] == -1.0
+    assert tree.nodes["b"].records[0]["advantage"] == fields["advantage"][1]

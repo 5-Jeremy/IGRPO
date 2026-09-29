@@ -331,3 +331,32 @@ def test_rootless_group_layout_and_selection(tmp_path):
         assert callback({"file": "1.jsonl", "tree": 0}, None)["node"] == "a"
     finally:
         context_value.reset(token)
+
+
+def test_q_component_node_details_and_colors(tmp_path):
+    from treehca.visualizer.app import create_app
+    from treehca.visualizer.presentation import detail_fields
+
+    records = [
+        row("a", grpo_advantage=-1.0, auxiliary_advantage=0.0, advantage=-0.25,
+            grpo_advantages=[-1.0], auxiliary_advantages=[0.0]),
+        row("b", ["a"], grpo_advantage=1.0, auxiliary_advantage=2.0, advantage=1.25,
+            grpo_advantages=[1.0], auxiliary_advantages=[2.0]),
+    ]
+    tree = load_file(write_rows(tmp_path / "1.jsonl", records)).trees[0]
+    fields = detail_fields(tree.nodes["b"], records[1])
+    assert fields["grpo_advantage"] == 1.0
+    assert fields["auxiliary_advantage"] == 2.0
+    assert fields["advantage"] == 1.25
+    assert "grpo_advantages" not in fields and "auxiliary_advantages" not in fields
+
+    app = create_app(tmp_path)
+    select = next(v["callback"].__wrapped__ for k, v in app.callback_map.items() if "metric.options" in k)
+    options = {option["value"] for option in select("1.jsonl", 0, 0)[-1]}
+    assert {"grpo_advantage", "auxiliary_advantage", "advantage"} <= options
+    render = next(v["callback"].__wrapped__ for k, v in app.callback_map.items() if "legend.children" in k)
+    for metric in ("grpo_advantage", "auxiliary_advantage"):
+        elements, _, legend = render({"file": "1.jsonl", "tree": 0}, metric)
+        colors = {element["data"]["id"]: element["data"]["color"] for element in elements if "position" in element}
+        assert colors["a"] != colors["b"]
+        assert metric in legend
