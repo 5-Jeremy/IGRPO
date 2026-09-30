@@ -94,6 +94,38 @@ def test_partial_json_reports_error_and_can_be_retried(tmp_path):
     assert cache.load("1.jsonl").record_count == 1
 
 
+def test_non_pruned_leaf_colors_propagate_to_ancestors(tmp_path):
+    from treehca.visualizer.app import create_app
+    from treehca.visualizer.data import NON_PRUNED_LEAF_MODE
+
+    rows = [
+        row("a"),
+        row("b", ["a"], termination_reason="pruned"),
+        row("c", ["a"], termination_reason="success"),
+        row("d"),
+        row("e", ["d"], deactivate=True),
+        row("f"),  # Older logs have no pruning fields.
+    ]
+    tree = load_file(write_rows(tmp_path / "1.jsonl", rows)).trees[0]
+    elements, limits = graph_elements(tree, NON_PRUNED_LEAF_MODE)
+    nodes = {element["data"]["id"]: element["data"] for element in elements if "position" in element}
+    assert limits is None
+    for uid in ("root", "a", "c", "f"):
+        assert nodes[uid]["color"] == "#0f172a"
+        assert nodes[uid]["foreground"] == "#ffffff"
+    for uid in ("b", "d", "e"):
+        assert nodes[uid]["color"] == "#ffffff"
+        assert nodes[uid]["foreground"] == "#0f172a"
+
+    app = create_app(tmp_path)
+    select = next(value["callback"].__wrapped__ for key, value in app.callback_map.items() if "metric.options" in key)
+    assert {"label": "Non-pruned leaf below", "value": NON_PRUNED_LEAF_MODE} in select("1.jsonl", 0, 0)[-1]
+    render = next(value["callback"].__wrapped__ for key, value in app.callback_map.items() if "legend.children" in key)
+    rendered, _, legend = render({"file": "1.jsonl", "tree": 0}, NON_PRUNED_LEAF_MODE)
+    assert rendered == elements
+    assert [entry.children[-1] for entry in legend] == ["Has non-pruned leaf below", "No non-pruned leaf below"]
+
+
 def test_page_type_colors_and_legend(tmp_path):
     from treehca.visualizer.app import create_app
     from treehca.visualizer.data import page_type_style
@@ -309,9 +341,10 @@ assert.deepEqual(fit(0,0,elements,null), ['unchanged','unchanged']);
 
 
 def test_rootless_group_layout_and_selection(tmp_path):
-    from treehca.visualizer.app import create_app
     from dash._callback_context import context_value
     from dash._utils import AttributeDict
+
+    from treehca.visualizer.app import create_app
 
     rows = [dict(node_path=["b", "a"], uid="group"), dict(node_path=["c"], uid="group"), dict(node_path=["a"], uid="group")]
     tree = load_file(write_rows(tmp_path / "1.jsonl", rows)).trees[0]

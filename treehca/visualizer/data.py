@@ -13,6 +13,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+NON_PRUNED_LEAF_MODE = "__non_pruned_leaf_below__"
+
 
 @dataclass
 class Node:
@@ -190,6 +192,7 @@ def page_type_style(node: Node):
 def graph_elements(tree: Tree, metric: str | None = None):
     """Fixed depth rows and centered parents, matching the reference viewer."""
     positions = {}
+    has_non_pruned_leaf = {}
     column = 0
     # Iterative postorder also handles long paths without Python recursion limits.
     stack = [(uid, False) for uid, node in reversed(list(tree.nodes.items())) if node.parent is None]
@@ -202,11 +205,14 @@ def graph_elements(tree: Tree, metric: str | None = None):
             continue
         if node.children:
             x = (positions[node.children[0]]["x"] + positions[node.children[-1]]["x"]) / 2
+            has_non_pruned_leaf[uid] = any(has_non_pruned_leaf[child] for child in node.children)
         else:
             x = column * 210
             column += 1
+            # A placeholder leaf has no saved outcome to classify.
+            has_non_pruned_leaf[uid] = bool(node.records) and node.records[0].get("termination_reason") != "pruned" and node.records[0].get("deactivate") is not True
         positions[uid] = {"x": x, "y": node.depth * 110}
-    values = {uid: numeric(n.records[0].get(metric)) if n.records and metric else None for uid, n in tree.nodes.items()}
+    values = {uid: numeric(n.records[0].get(metric)) if n.records and metric and metric != NON_PRUNED_LEAF_MODE else None for uid, n in tree.nodes.items()}
     finite = [v for v in values.values() if v is not None]
     limits = (min(finite), max(finite)) if finite else None
     elements = []
@@ -216,6 +222,9 @@ def graph_elements(tree: Tree, metric: str | None = None):
         foreground = "#0f172a"
         if metric == "page_type":
             _, color = page_type_style(node)
+        elif metric == NON_PRUNED_LEAF_MODE:
+            color = "#0f172a" if has_non_pruned_leaf[uid] else "#ffffff"
+            foreground = "#ffffff" if has_non_pruned_leaf[uid] else "#0f172a"
         elif metric:
             value = values[uid]
             color = "#e2e8f0"

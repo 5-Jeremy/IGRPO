@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 
-from .data import FileCache, discover_files, graph_elements, numeric, page_type_style
+from .data import NON_PRUNED_LEAF_MODE, FileCache, discover_files, graph_elements, numeric, page_type_style
 from .presentation import HIDDEN_COLOR_FIELDS, PROMPT_FIELDS, detail_fields, prompt_sections, visible_fields
 
 GRAPH_STYLE = [
@@ -32,7 +32,7 @@ GRAPH_STYLE = [
     {"selector": "edge", "style": {"curve-style": "bezier", "width": 3, "line-color": "#475569", "target-arrow-color": "#0f172a", "target-arrow-shape": "triangle", "target-distance-from-node": 4, "arrow-scale": 1.6}},
 ]
 
-COLOR_OPTIONS = [{"label": "Structural type", "value": ""}, {"label": "Page type", "value": "page_type"}]
+COLOR_OPTIONS = [{"label": "Structural type", "value": ""}, {"label": "Page type", "value": "page_type"}, {"label": "Non-pruned leaf below", "value": NON_PRUNED_LEAF_MODE}]
 
 
 def format_value(value):
@@ -206,7 +206,7 @@ def create_app(log_dir: Path):
         except (ValueError, OSError, UnicodeError, IndexError):
             return empty
         fields = sorted({key for node in tree.nodes.values() for record in node.records for key, value in record.items() if key not in HIDDEN_COLOR_FIELDS and numeric(value) is not None})
-        return {"file": filename, "tree": index, "refresh": clicks}, " ".join(tree.warnings), table(tree.statistics), COLOR_OPTIONS + [{"label": f, "value": f} for f in fields if f != "page_type"]
+        return {"file": filename, "tree": index, "refresh": clicks}, " ".join(tree.warnings), table(tree.statistics), COLOR_OPTIONS + [{"label": f, "value": f} for f in fields if f not in {"page_type", NON_PRUNED_LEAF_MODE}]
 
     @app.callback(Output("graph", "elements"), Output("graph", "layout"), Output("legend", "children"), Input("view", "data"), Input("metric", "value"))
     def render_graph(view, metric):
@@ -218,6 +218,11 @@ def create_app(log_dir: Path):
             categories = sorted({page_type_style(node) for node in tree.nodes.values()}) if tree else []
             legend = [html.Span([html.I(className="legend-swatch", style={"backgroundColor": color}), label]) for label, color in categories]
             legend.append(html.Span("Page before action · first record per node"))
+        elif metric == NON_PRUNED_LEAF_MODE:
+            legend = [
+                html.Span([html.I(className="legend-swatch", style={"backgroundColor": "#0f172a"}), "Has non-pruned leaf below"]),
+                html.Span([html.I(className="legend-swatch", style={"backgroundColor": "#ffffff"}), "No non-pruned leaf below"]),
+            ]
         elif metric:
             legend = f"{metric}: {limits[0]:.6g} → {limits[1]:.6g} · darker = higher; gray = missing/nonfinite" if limits else f"{metric}: no finite values"
             legend += " · first record per node"

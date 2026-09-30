@@ -37,6 +37,12 @@ the legend lists categories present in the selected tree. The empty-string page
 type is labeled **Initial search ("")**, separately from missing data and the
 synthetic root. As with numeric colors, duplicate nodes use their first record.
 
+Select **Non-pruned leaf below** to color a node dark when it is a non-pruned
+graph leaf or has one among its descendants; other nodes are white. A leaf is
+pruned when its first saved record has `termination_reason: "pruned"` or
+`deactivate: true`. Leaf placeholders with no saved record are white. Older
+records without pruning fields are treated as non-pruned.
+
 Click a node to inspect saved fields, including unknown future fields, nested
 objects, arrays, and full numeric precision. Node/parent/child UIDs, ancestry
 paths, and JSONL line numbers are omitted from the details pane. Duplicate saved
