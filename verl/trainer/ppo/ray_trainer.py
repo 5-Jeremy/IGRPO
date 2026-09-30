@@ -380,6 +380,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 successful_terminal=data.non_tensor_batch["termination_reason"] == "success",
                 turns_threshold=kwargs.get("treehca_no_progress_turns_threshold", 3),
                 info_gain_threshold=kwargs.get("treehca_no_progress_info_gain_threshold", 0.05),
+                rms_max_multiplier=kwargs.get("treehca_no_progress_rms_max_multiplier", 3.0),
             )
             treehca_metrics.update(no_progress_metrics)
         data.batch["advantages"] = advantages
@@ -695,6 +696,7 @@ class RayPPOTrainer:
             assert config.algorithm.igrpo.reward_mode in ["avg", "max"], "TreeHCA requires algorithm.igrpo.reward_mode in ['avg', 'max']; 'full' unrolls the tree into root-to-leaf chains"
             assert config.algorithm.treehca.leaf_baseline in ["group", "none"], f"Invalid treehca.leaf_baseline: {config.algorithm.treehca.leaf_baseline}"
             no_progress_advantage_cap = config.algorithm.treehca.get("no_progress_advantage_cap", False)
+            core_treehca.validate_no_progress_rms_max_multiplier(config.algorithm.treehca.get("no_progress_rms_max_multiplier", 3.0))
             if not isinstance(no_progress_advantage_cap, bool):
                 raise ValueError(f"treehca.no_progress_advantage_cap must be a bool, got {no_progress_advantage_cap!r}")
             no_progress_turns_threshold = config.algorithm.treehca.get("no_progress_turns_threshold", 3)
@@ -1448,6 +1450,7 @@ class RayPPOTrainer:
                             treehca_no_progress_advantage_cap=self.config.algorithm.treehca.get("no_progress_advantage_cap", False),
                             treehca_no_progress_turns_threshold=self.config.algorithm.treehca.get("no_progress_turns_threshold", 3),
                             treehca_no_progress_info_gain_threshold=self.config.algorithm.treehca.get("no_progress_info_gain_threshold", 0.05),
+                            treehca_no_progress_rms_max_multiplier=self.config.algorithm.treehca.get("no_progress_rms_max_multiplier", 3.0),
                         )
                         metrics.update(batch.meta_info.pop("treehca_metrics", {}))
                         self.debug_batch_instance(batch, "after_adv")

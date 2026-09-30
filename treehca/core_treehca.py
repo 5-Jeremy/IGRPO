@@ -36,6 +36,78 @@ from treehca.premature_leaf_filter import PrematureLeafFilter
 from verl.trainer.ppo.core_algos import compute_grpo_outcome_advantage
 
 
+def validate_no_progress_rms_max_multiplier(value):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)) or not np.isfinite(value) or value < 1:
+        raise ValueError(f"treehca.no_progress_rms_max_multiplier must be finite and >= 1, got {value!r}")
+
+
+def _redistribute_no_progress_positive_norm(advantages, modified, response_mask, node_rows, parent_node_uid, is_terminal, nodes_to_cap, max_multiplier):
+    """Restore removed positive squared norm within each connected rollout tree."""
+    row_of = {node: rows[0] for node, rows in node_rows.items()}
+    root_of = {}
+    tree_rows = defaultdict(list)
+    for node in row_of:
+        path, seen = [], set()
+        current = node
+        while current not in root_of:
+            if current in seen:
+                raise ValueError(f"Cycle in TreeHCA rollout tree at {current}")
+            seen.add(current)
+            path.append(current)
+            parent = parent_node_uid[row_of[current]]
+            if parent not in row_of:
+                # Each materialized root starts its own tree, even if all use "root".
+                root_of[current] = current
+                break
+            current = parent
+        for ancestor in path:
+            root_of[ancestor] = root_of[current]
+        tree_rows[root_of[node]].extend(node_rows[node])
+
+    capped = torch.zeros(len(advantages), dtype=torch.bool, device=advantages.device)
+    for node in nodes_to_cap:
+        capped[node_rows[node]] = True
+    terminal = torch.as_tensor(np.asarray(is_terminal, dtype=bool), device=advantages.device)
+    removed_total = restored_total = 0.0
+    multipliers = []
+    limited_trees = no_recipient_trees = 0
+    for rows in tree_rows.values():
+        if not capped[rows].any():
+            continue
+        before = advantages[rows]
+        valid = response_mask[rows].bool()
+        # Count actual training tokens, including adjustment copies; padding is excluded.
+        positive = torch.where(valid & (before > 0), before, 0).double()
+        removed = positive[capped[rows]].square().sum().item()
+        if removed == 0:
+            continue
+        eligible = (~capped[rows] & ~terminal[rows]).unsqueeze(-1) & valid & (before > 0)
+        remaining = torch.where(eligible, positive, 0).square().sum().item()
+        removed_total += removed
+        if remaining == 0:
+            no_recipient_trees += 1
+            continue
+        # The token denominator is unchanged, so preserving squared norm preserves RMS.
+        requested = float(np.sqrt(1.0 + removed / remaining))
+        multiplier = min(max_multiplier, requested)
+        multipliers.append(multiplier)
+        limited_trees += int(requested > max_multiplier)
+        modified[rows] = torch.where(eligible, modified[rows] * multiplier, modified[rows])
+        restored_total += remaining * (multiplier ** 2 - 1.0)
+
+    return {
+        "treehca/no_progress/rms_multiplier_mean": float(np.mean(multipliers)) if multipliers else 1.0,
+        "treehca/no_progress/rms_multiplier_max": max(multipliers, default=1.0),
+        "treehca/no_progress/rms_rescaled_tree_count": float(sum(s > 1 for s in multipliers)),
+        "treehca/no_progress/rms_limited_tree_count": float(limited_trees),
+        "treehca/no_progress/rms_no_recipient_tree_count": float(no_recipient_trees),
+        "treehca/no_progress/removed_positive_squared_norm": removed_total,
+        "treehca/no_progress/restored_positive_squared_norm": restored_total,
+        "treehca/no_progress/unrestored_positive_squared_norm": max(0.0, removed_total - restored_total),
+    }
+
+
+@torch.no_grad()
 def cap_no_progress_advantages(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
@@ -46,6 +118,7 @@ def cap_no_progress_advantages(
     successful_terminal: np.ndarray,
     turns_threshold: int = 3,
     info_gain_threshold: float = 0.05,
+    rms_max_multiplier: float = 3.0,
 ):
     """Cap advantages for sustained low-progress runs on successful paths.
 
@@ -54,6 +127,9 @@ def cap_no_progress_advantages(
     configured threshold is capped when it contains enough turns. Logical
     nodes duplicated in the batch are modified together. Terminal nodes are
     excluded from both the run length and the modification.
+    Removed positive squared norm is redistributed over valid tokens of uncapped,
+    positive, non-terminal nodes in the same connected tree, with a bounded scale.
+    A maximum multiplier of 1 disables redistribution.
 
     Returns:
         The modified advantages and diagnostics for the trainer logger.
@@ -65,6 +141,7 @@ def cap_no_progress_advantages(
     info_gain_threshold = float(info_gain_threshold)
     if not np.isfinite(info_gain_threshold) or info_gain_threshold < 0:
         raise ValueError(f"treehca.no_progress_info_gain_threshold must be a finite float >= 0, got {info_gain_threshold!r}")
+    validate_no_progress_rms_max_multiplier(rms_max_multiplier)
 
     batch_size = advantages.shape[0]
     if any(len(values) != batch_size for values in (response_mask, node_uid, parent_node_uid, is_terminal, info_gain, successful_terminal)):
@@ -126,6 +203,9 @@ def cap_no_progress_advantages(
         "treehca/no_progress/capped_node_count": float(len(nodes_to_cap)),
         "treehca/no_progress/capped_row_count": float(len(capped_rows)),
     }
+    metrics.update(_redistribute_no_progress_positive_norm(
+        advantages, modified, response_mask, node_rows, parent_node_uid, is_terminal, nodes_to_cap, rms_max_multiplier,
+    ))
     return modified, metrics
 
 

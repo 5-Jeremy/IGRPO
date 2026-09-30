@@ -32,6 +32,7 @@ def test_caps_complete_low_progress_runs_only_on_successful_rollouts():
         parent_node_uid=["root", "a", "b", "c", "d", "a", "e", "f"],
         info_gain=[0.2, 0.01, 0.02, 0.03, 0.01, 0.01, 0.02, 0.03],
         successful_terminal=[False, False, False, False, True, False, False, False],
+        rms_max_multiplier=1.0,
     )
 
     # b-c-d qualifies; c's negative advantage is preserved. The successful
@@ -69,6 +70,73 @@ def test_terminal_node_does_not_complete_a_run():
     assert metrics["treehca/no_progress/capped_node_count"] == 0
 
 
+@pytest.mark.parametrize("max_multiplier", [1.0, 1.2, 3.0])
+def test_masked_rms_redistributes_only_to_positive_nonterminal_nodes_in_same_tree(max_multiplier):
+    # Two trees share the external root sentinel. The second has different removed mass.
+    nodes = np.asarray(["a", "b", "s", "negative", "zero", "x", "y", "t"], dtype=object)
+    parents = np.asarray(["root", "a", "b", "a", "a", "root", "x", "y"], dtype=object)
+    terminal = np.asarray([False, False, True, False, False, False, False, True])
+    gains = np.asarray([0.2, 0.01, 0, 0.2, 0.2, 0.2, 0.01, 0])
+    advantages = torch.tensor([[2., 2., 999.], [3., 999., 999.], [10., 10., 999.], [-4., -4., 999.], [0., 0., 999.], [4., 999., 999.], [1., 1., 999.], [20., 999., 999.]])
+    mask = torch.tensor([[1, 1, 0], [1, 0, 0], [1, 1, 0], [1, 1, 0], [1, 1, 0], [1, 0, 0], [1, 1, 0], [1, 0, 0]])
+    original = advantages.clone()
+    modified, metrics = cap_no_progress_advantages(
+        advantages, mask, nodes, parents, terminal, gains, terminal,
+        turns_threshold=1, rms_max_multiplier=max_multiplier,
+    )
+    scale_a = min(max_multiplier, np.sqrt(17 / 8))
+    scale_x = min(max_multiplier, np.sqrt(18 / 16))
+    assert modified[0, :2].tolist() == pytest.approx([2 * scale_a] * 2)
+    assert modified[5, 0].item() == pytest.approx(4 * scale_x)
+    assert torch.equal(modified[[2, 3, 4, 7]], original[[2, 3, 4, 7]])
+    assert torch.count_nonzero(modified[[1, 6]]) == 0
+    assert modified[0, 2] == 999  # Padding neither contributes nor receives redistributed norm.
+    assert torch.equal(advantages, original)
+    assert metrics["treehca/no_progress/removed_positive_squared_norm"] == 11
+    restored = 8 * (scale_a ** 2 - 1) + 16 * (scale_x ** 2 - 1)
+    assert metrics["treehca/no_progress/restored_positive_squared_norm"] == pytest.approx(restored)
+    assert metrics["treehca/no_progress/unrestored_positive_squared_norm"] == pytest.approx(11 - restored, abs=1e-12)
+    if max_multiplier == 3:
+        for rows in ([0, 1, 2, 3, 4], [5, 6, 7]):
+            torch.testing.assert_close((modified[rows].square() * mask[rows]).sum(), (original[rows].square() * mask[rows]).sum())
+
+
+def test_rms_handles_duplicate_nodes_and_reordered_rows():
+    # Both copies of the removed node contribute to the actual training-token norm.
+    advantages, metrics = _cap(
+        advantages=[3, 5, 2, 3, 2],
+        node_uid=["b", "s", "a", "b", "a"],
+        parent_node_uid=["a", "b", "root", "a", "root"],
+        info_gain=[0.01, 0, 0.2, 0.01, 0.2],
+        successful_terminal=[False, True, False, False, False],
+        turns_threshold=1,
+    )
+    scale = np.sqrt((8 + 18) / 8)
+    assert advantages.squeeze(-1).tolist() == pytest.approx([0, 5, 2 * scale, 0, 2 * scale])
+    assert metrics["treehca/no_progress/removed_positive_squared_norm"] == 18
+    assert metrics["treehca/no_progress/rms_rescaled_tree_count"] == 1
+
+
+@pytest.mark.parametrize("recipient", [0., -2., 1e-30])
+def test_rms_no_positive_recipients_or_tiny_remaining_norm_is_safe(recipient):
+    modified, metrics = _cap(
+        advantages=[recipient, 3, 4], node_uid=["a", "b", "s"],
+        parent_node_uid=["root", "a", "b"], info_gain=[0.2, 0.01, 0],
+        successful_terminal=[False, False, True], turns_threshold=1,
+    )
+    assert torch.isfinite(modified).all()
+    assert modified[0, 0].item() == pytest.approx(recipient * 3 if recipient > 0 else recipient, abs=1e-35)
+    assert modified[1:, 0].tolist() == [0, 4]
+    assert metrics["treehca/no_progress/rms_no_recipient_tree_count"] == (recipient <= 0)
+    assert metrics["treehca/no_progress/rms_limited_tree_count"] == (recipient > 0)
+
+
+@pytest.mark.parametrize("value", [0.9, -1, True, "3", None, float("nan"), float("inf")])
+def test_rejects_invalid_rms_multiplier(value):
+    with pytest.raises(ValueError, match="no_progress_rms_max_multiplier"):
+        _cap([1], ["a"], ["root"], [0], [True], rms_max_multiplier=value)
+
+
 def test_caps_all_rows_for_a_duplicated_logical_node_and_preserves_padding():
     advantages = torch.tensor([[4.0, 99.0], [5.0, 99.0], [6.0, 99.0], [7.0, 99.0]])
     mask = torch.tensor([[1.0, 0.0]] * 4)
@@ -88,7 +156,9 @@ def test_caps_all_rows_for_a_duplicated_logical_node_and_preserves_padding():
     assert metrics["treehca/no_progress/capped_row_count"] == 3
 
 
-def test_trainer_applies_cap_after_tree_credit_and_leaves_returns_unchanged():
+@pytest.mark.parametrize("credit", ["snis", "q_hindsight"])
+@pytest.mark.parametrize("max_multiplier", [1.25, 3.0])
+def test_trainer_applies_cap_after_tree_credit_and_leaves_returns_unchanged(credit, max_multiplier):
     from verl.trainer.ppo.ray_trainer import compute_advantage
 
     data = DataProto.from_dict(
@@ -102,22 +172,31 @@ def test_trainer_applies_cap_after_tree_credit_and_leaves_returns_unchanged():
             "parent_node_uid": np.asarray(["root", "a", "b", "c"], dtype=object),
             "is_terminal": np.asarray([False, False, False, True]),
             "info_gain_sum": np.asarray([0.2, 0.3, 0.4, 0.5]),
-            "info_gain": np.asarray([0.01, 0.02, 0.03, 0.01]),
+            "info_gain": np.asarray([0.2, 0.02, 0.03, 0.01]),
             "traj_step": np.asarray([0, 1, 2, 3]),
             "termination_reason": np.asarray([None, None, None, "success"], dtype=object),
         },
     )
 
+    credit_kwargs = dict(treehca_credit=credit, treehca_leaf_baseline="none", treehca_grpo_weight=0.0, treehca_q_weight=1.0)
+    baseline = compute_advantage(data, AdvantageEstimator.TREEHCA, **credit_kwargs)
+    before = baseline.batch["advantages"].clone()
+    before_returns = baseline.batch["returns"].clone()
     result = compute_advantage(
         data,
         AdvantageEstimator.TREEHCA,
-        treehca_leaf_baseline="none",
+        **credit_kwargs,
         treehca_no_progress_advantage_cap=True,
+        treehca_no_progress_turns_threshold=2,
+        treehca_no_progress_rms_max_multiplier=max_multiplier,
     )
 
-    assert result.batch["advantages"].tolist() == [[0, 0], [0, 0], [0, 0], [2, 2]]
-    assert result.batch["returns"].tolist() == [[2, 2], [2, 2], [2, 2], [2, 2]]
-    assert result.meta_info["treehca_metrics"]["treehca/no_progress/capped_node_count"] == 3
+    scale = min(max_multiplier, torch.sqrt(before[:3].square().sum() / before[0].square().sum()).item())
+    torch.testing.assert_close(result.batch["advantages"][0], before[0] * scale)
+    assert torch.count_nonzero(result.batch["advantages"][1:3]) == 0
+    torch.testing.assert_close(result.batch["advantages"][3], before[3])
+    torch.testing.assert_close(result.batch["returns"], before_returns)
+    assert result.meta_info["treehca_metrics"]["treehca/no_progress/capped_node_count"] == 2
 
 
 @pytest.mark.parametrize(

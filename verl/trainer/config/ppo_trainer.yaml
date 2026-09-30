@@ -279,6 +279,7 @@ algorithm:
     no_progress_advantage_cap: False # cap advantages at zero for sustained low-info-gain runs on successful rollouts
     no_progress_turns_threshold: 3 # minimum consecutive low-progress nodes to cap
     no_progress_info_gain_threshold: 0.05 # a node has low progress when info_gain is strictly below this value
+    no_progress_rms_max_multiplier: 3.0 # >=1; restore removed positive norm within each tree; 1 disables rescaling; terminals are excluded
   igpo:
     prob_diff_mode: True
     use_think: False # whether to use the <think> content in IGPO
