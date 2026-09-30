@@ -123,7 +123,7 @@ def cap_no_progress_advantages(
     """Cap advantages for sustained low-progress runs on successful paths.
 
     Every successful terminal defines one root-to-leaf rollout. A maximal
-    contiguous run whose nodes all have information gain strictly below the
+    contiguous run whose nodes all have information gain less than or equal to the
     configured threshold is capped when it contains enough turns. Logical
     nodes duplicated in the batch are modified together. Terminal nodes are
     excluded from both the run length and the modification.
@@ -179,7 +179,7 @@ def cap_no_progress_advantages(
                     qualifying_runs += 1
                 run = []
                 continue
-            if float(info_gain[row_of[node]]) < info_gain_threshold:
+            if float(info_gain[row_of[node]]) <= info_gain_threshold:
                 run.append(node)
                 continue
             if len(run) >= turns_threshold:

@@ -2,11 +2,17 @@
 
 Enable with `algorithm.treehca.no_progress_advantage_cap=True`. After TreeHCA
 credit assignment, successful root-to-leaf paths are scanned for consecutive
-non-terminal nodes whose `info_gain` is strictly below
+non-terminal nodes whose `info_gain` is less than or equal to
 `no_progress_info_gain_threshold` (default `0.05`). Runs of at least
 `no_progress_turns_threshold` nodes (default `3`) have their advantages capped
 at zero. Terminal nodes neither contribute to runs nor have their advantages
 modified, including during redistribution.
+
+The comparison is inclusive (`info_gain <= no_progress_info_gain_threshold`),
+with no tolerance or rounding applied by this check. At threshold `0`, zero
+and negative information gains qualify; any stored positive information gain,
+however small, breaks the run and is not capped. Nodes must still belong to a
+run of sufficient length to be capped.
 
 For each connected tree, let `R` be the sum of squared positive advantages
 removed by the cap, and `P` the sum of squared positive advantages on eligible

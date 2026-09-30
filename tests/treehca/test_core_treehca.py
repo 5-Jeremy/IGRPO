@@ -43,17 +43,38 @@ def test_caps_complete_low_progress_runs_only_on_successful_rollouts():
     assert metrics["treehca/no_progress/capped_node_count"] == 3
 
 
-def test_threshold_equality_breaks_a_run_and_short_runs_are_not_capped():
+@pytest.mark.parametrize("boundary_gain, qualifies", [(0.125, True), (np.nextafter(np.float32(0.125), np.float32(1)), False)])
+def test_threshold_equality_qualifies_but_value_above_breaks_run(boundary_gain, qualifies):
     modified, metrics = _cap(
         advantages=[1, 2, 3, 4, 5],
         node_uid=["a", "b", "c", "d", "e"],
         parent_node_uid=["root", "a", "b", "c", "d"],
-        info_gain=[0.01, 0.02, 0.05, 0.03, 0.04],
+        info_gain=[0.01, 0.02, boundary_gain, 0.03, 0.04],
         successful_terminal=[False, False, False, False, True],
+        info_gain_threshold=0.125,  # Exactly representable in both float32 and float64.
+        rms_max_multiplier=1.0,
     )
 
-    assert modified.squeeze(-1).tolist() == pytest.approx([1, 2, 3, 4, 5])
-    assert metrics["treehca/no_progress/qualifying_run_count"] == 0
+    assert modified.squeeze(-1).tolist() == ([0, 0, 0, 0, 5] if qualifies else [1, 2, 3, 4, 5])
+    assert metrics["treehca/no_progress/qualifying_run_count"] == int(qualifies)
+
+
+@pytest.mark.parametrize("turns_threshold", [1, 3])
+def test_zero_threshold_qualifies_zero_but_smallest_positive_gain_breaks_run(turns_threshold):
+    tiny_positive = np.nextafter(np.float32(0), np.float32(1))
+    modified, metrics = _cap(
+        advantages=[1, 2, 3, 4, 5, 6, 7],
+        node_uid=["a", "b", "c", "d", "e", "f", "terminal"],
+        parent_node_uid=["root", "a", "b", "c", "d", "e", "f"],
+        info_gain=[0, 0, tiny_positive, 0, -0.01, 0, 0],
+        successful_terminal=[False, False, False, False, False, False, True],
+        info_gain_threshold=0.0,
+        turns_threshold=turns_threshold,
+        rms_max_multiplier=1.0,
+    )
+
+    assert modified.squeeze(-1).tolist() == ([0, 0, 3, 0, 0, 0, 7] if turns_threshold == 1 else [1, 2, 3, 0, 0, 0, 7])
+    assert metrics["treehca/no_progress/capped_node_count"] == (5 if turns_threshold == 1 else 3)
 
 
 def test_terminal_node_does_not_complete_a_run():
