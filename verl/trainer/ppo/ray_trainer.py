@@ -378,6 +378,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 is_terminal=data.non_tensor_batch["is_terminal"],
                 info_gain=data.non_tensor_batch["info_gain"],
                 successful_terminal=data.non_tensor_batch["termination_reason"] == "success",
+                pruned_terminal=data.non_tensor_batch["termination_reason"] == "pruned",
                 turns_threshold=kwargs.get("treehca_no_progress_turns_threshold", 3),
                 info_gain_threshold=kwargs.get("treehca_no_progress_info_gain_threshold", 0.05),
                 rms_max_multiplier=kwargs.get("treehca_no_progress_rms_max_multiplier", 3.0),

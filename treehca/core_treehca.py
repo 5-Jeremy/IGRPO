@@ -119,14 +119,15 @@ def cap_no_progress_advantages(
     turns_threshold: int = 3,
     info_gain_threshold: float = 0.05,
     rms_max_multiplier: float = 3.0,
+    pruned_terminal: np.ndarray | None = None,
 ):
-    """Cap advantages for sustained low-progress runs on successful paths.
+    """Cap advantages for sustained low-progress runs on successful or pruned paths.
 
-    Every successful terminal defines one root-to-leaf rollout. A maximal
+    Every successful or pruned terminal defines one root-to-leaf rollout. A maximal
     contiguous run whose nodes all have information gain less than or equal to the
     configured threshold is capped when it contains enough turns. Logical
-    nodes duplicated in the batch are modified together. Terminal nodes are
-    excluded from both the run length and the modification.
+    nodes duplicated in the batch are modified together. Pruned terminals count
+    toward runs and can be capped; all other terminals are excluded.
     Removed positive squared norm is redistributed over valid tokens of uncapped,
     positive, non-terminal nodes in the same connected tree, with a bounded scale.
     A maximum multiplier of 1 disables redistribution.
@@ -144,8 +145,11 @@ def cap_no_progress_advantages(
     validate_no_progress_rms_max_multiplier(rms_max_multiplier)
 
     batch_size = advantages.shape[0]
-    if any(len(values) != batch_size for values in (response_mask, node_uid, parent_node_uid, is_terminal, info_gain, successful_terminal)):
+    if pruned_terminal is None:
+        pruned_terminal = np.zeros(batch_size, dtype=bool)
+    if any(len(values) != batch_size for values in (response_mask, node_uid, parent_node_uid, is_terminal, info_gain, successful_terminal, pruned_terminal)):
         raise ValueError("TreeHCA no-progress inputs must all have the same batch size")
+    pruned_terminal = np.asarray(pruned_terminal, dtype=bool) & np.asarray(is_terminal, dtype=bool)
 
     node_rows = defaultdict(list)
     for row, node in enumerate(node_uid):
@@ -154,11 +158,15 @@ def cap_no_progress_advantages(
 
     nodes_to_cap = set()
     successful_rollouts = 0
+    pruned_rollouts = 0
     qualifying_runs = 0
     for terminal_node, terminal_rows in node_rows.items():
-        if not any(bool(successful_terminal[row]) for row in terminal_rows):
+        successful = any(bool(successful_terminal[row]) for row in terminal_rows)
+        pruned = any(bool(pruned_terminal[row]) for row in terminal_rows)
+        if not (successful or pruned):
             continue
-        successful_rollouts += 1
+        successful_rollouts += int(successful)
+        pruned_rollouts += int(pruned)
 
         # Follow the stored tree edges, then scan the rollout chronologically.
         path = []
@@ -173,7 +181,8 @@ def cap_no_progress_advantages(
 
         run = []
         for node in reversed(path):
-            if bool(is_terminal[row_of[node]]):
+            # Allocation pruning ends a rollout without an environment terminal action.
+            if bool(is_terminal[row_of[node]]) and not bool(pruned_terminal[row_of[node]]):
                 if len(run) >= turns_threshold:
                     nodes_to_cap.update(run)
                     qualifying_runs += 1
@@ -199,6 +208,7 @@ def cap_no_progress_advantages(
 
     metrics = {
         "treehca/no_progress/successful_rollout_count": float(successful_rollouts),
+        "treehca/no_progress/pruned_rollout_count": float(pruned_rollouts),
         "treehca/no_progress/qualifying_run_count": float(qualifying_runs),
         "treehca/no_progress/capped_node_count": float(len(nodes_to_cap)),
         "treehca/no_progress/capped_row_count": float(len(capped_rows)),

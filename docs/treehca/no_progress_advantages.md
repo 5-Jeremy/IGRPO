@@ -1,12 +1,20 @@
 # No-progress advantage cap and RMS preservation
 
 Enable with `algorithm.treehca.no_progress_advantage_cap=True`. After TreeHCA
-credit assignment, successful root-to-leaf paths are scanned for consecutive
-non-terminal nodes whose `info_gain` is less than or equal to
+credit assignment, paths ending in success or allocation pruning are scanned for
+consecutive nodes whose `info_gain` is less than or equal to
 `no_progress_info_gain_threshold` (default `0.05`). Runs of at least
 `no_progress_turns_threshold` nodes (default `3`) have their advantages capped
-at zero. Terminal nodes neither contribute to runs nor have their advantages
-modified, including during redistribution.
+at zero. Leaves with `termination_reason == "pruned"` count toward the run
+length and can have their advantages capped, along with qualifying ancestors.
+The path need not contain a successful outcome. Successful terminals remain
+excluded from runs and capping. Paths ending in failure, the turn limit, or
+another terminal reason do not initiate a scan. Shared ancestors can still be
+capped through another successful or pruned path.
+
+All terminal nodes, including uncapped pruned leaves, remain excluded from
+receiving redistributed norm. Norm removed from a capped pruned leaf is
+redistributed to eligible non-terminal nodes in the same tree.
 
 The comparison is inclusive (`info_gain <= no_progress_info_gain_threshold`),
 with no tolerance or rounding applied by this check. At threshold `0`, zero
@@ -37,7 +45,8 @@ tree's masked advantage RMS (up to rounding). It does not guarantee the exact
 parameter-gradient norm. It uses token weighting, matching the default
 `token-mean` policy loss; other loss aggregation modes can weight nodes differently.
 
-Metrics under `treehca/no_progress/` report multiplier mean/max, rescaled and
+Metrics under `treehca/no_progress/` report successful/pruned rollout counts,
+multiplier mean/max, rescaled and
 limited tree counts, trees without recipients, and removed/restored/unrestored
 positive squared norm. Unrestored norm records the shortfall from the multiplier
 limit or lack of eligible recipients.

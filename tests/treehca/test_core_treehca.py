@@ -91,6 +91,28 @@ def test_terminal_node_does_not_complete_a_run():
     assert metrics["treehca/no_progress/capped_node_count"] == 0
 
 
+@pytest.mark.parametrize("leaf_gain", [0.0, np.nextafter(np.float32(0), np.float32(1))])
+@pytest.mark.parametrize("turns_threshold", [3, 4])
+def test_pruned_leaf_counts_toward_run_without_success_and_caps_all_copies(leaf_gain, turns_threshold):
+    modified, metrics = _cap(
+        advantages=[2, -1, 4, 4],
+        node_uid=["a", "b", "pruned", "pruned"],
+        parent_node_uid=["root", "a", "b", "b"],
+        info_gain=[0, 0, leaf_gain, leaf_gain],
+        is_terminal=[False, False, True, True],
+        successful_terminal=[False] * 4,
+        pruned_terminal=np.asarray([False, False, True, True]),
+        turns_threshold=turns_threshold,
+        info_gain_threshold=0,
+    )
+
+    qualifies = leaf_gain == 0 and turns_threshold == 3
+    assert modified.squeeze(-1).tolist() == ([0, -1, 0, 0] if qualifies else [2, -1, 4, 4])
+    assert metrics["treehca/no_progress/successful_rollout_count"] == 0
+    assert metrics["treehca/no_progress/pruned_rollout_count"] == 1
+    assert metrics["treehca/no_progress/capped_node_count"] == (3 if qualifies else 0)
+
+
 @pytest.mark.parametrize("max_multiplier", [1.0, 1.2, 3.0])
 def test_masked_rms_redistributes_only_to_positive_nonterminal_nodes_in_same_tree(max_multiplier):
     # Two trees share the external root sentinel. The second has different removed mass.
@@ -179,7 +201,8 @@ def test_caps_all_rows_for_a_duplicated_logical_node_and_preserves_padding():
 
 @pytest.mark.parametrize("credit", ["snis", "q_hindsight"])
 @pytest.mark.parametrize("max_multiplier", [1.25, 3.0])
-def test_trainer_applies_cap_after_tree_credit_and_leaves_returns_unchanged(credit, max_multiplier):
+@pytest.mark.parametrize("reason", ["success", "pruned", "turn_limit", "environment_failure"])
+def test_trainer_applies_cap_after_tree_credit_and_leaves_returns_unchanged(credit, max_multiplier, reason):
     from verl.trainer.ppo.ray_trainer import compute_advantage
 
     data = DataProto.from_dict(
@@ -195,7 +218,7 @@ def test_trainer_applies_cap_after_tree_credit_and_leaves_returns_unchanged(cred
             "info_gain_sum": np.asarray([0.2, 0.3, 0.4, 0.5]),
             "info_gain": np.asarray([0.2, 0.02, 0.03, 0.01]),
             "traj_step": np.asarray([0, 1, 2, 3]),
-            "termination_reason": np.asarray([None, None, None, "success"], dtype=object),
+            "termination_reason": np.asarray([None, None, None, reason], dtype=object),
         },
     )
 
@@ -212,12 +235,21 @@ def test_trainer_applies_cap_after_tree_credit_and_leaves_returns_unchanged(cred
         treehca_no_progress_rms_max_multiplier=max_multiplier,
     )
 
-    scale = min(max_multiplier, torch.sqrt(before[:3].square().sum() / before[0].square().sum()).item())
-    torch.testing.assert_close(result.batch["advantages"][0], before[0] * scale)
-    assert torch.count_nonzero(result.batch["advantages"][1:3]) == 0
-    torch.testing.assert_close(result.batch["advantages"][3], before[3])
+    if reason in ("success", "pruned"):
+        # Pruned terminal mass is also removed and redistributed; successful terminals stay fixed.
+        end = 4 if reason == "pruned" else 3
+        scale = min(max_multiplier, torch.sqrt(before[:end].square().sum() / before[0].square().sum()).item())
+        torch.testing.assert_close(result.batch["advantages"][0], before[0] * scale)
+        assert torch.count_nonzero(result.batch["advantages"][1:end]) == 0
+        if reason == "success":
+            torch.testing.assert_close(result.batch["advantages"][3], before[3])
+        expected_count = end - 1
+    else:
+        torch.testing.assert_close(result.batch["advantages"], before)
+        expected_count = 0
     torch.testing.assert_close(result.batch["returns"], before_returns)
-    assert result.meta_info["treehca_metrics"]["treehca/no_progress/capped_node_count"] == 2
+    assert result.meta_info["treehca_metrics"]["treehca/no_progress/capped_node_count"] == expected_count
+    assert result.meta_info["treehca_metrics"]["treehca/no_progress/pruned_rollout_count"] == int(reason == "pruned")
 
 
 @pytest.mark.parametrize(

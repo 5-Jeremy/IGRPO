@@ -276,7 +276,7 @@ algorithm:
     leaf_baseline: group # group: GRPO-style baseline over the leaves of a prompt group; none: raw outcome score
     norm_adv_by_std: True # only used when leaf_baseline == group
     filter_premature_leaves: False # stop allocation-pruned leaves at ancestors that also contain a full-score leaf
-    no_progress_advantage_cap: False # cap advantages at zero for sustained low-info-gain runs on successful rollouts
+    no_progress_advantage_cap: False # cap low-info-gain runs on successful or pruned rollouts; pruned leaves count toward runs
     no_progress_turns_threshold: 3 # minimum consecutive low-progress nodes to cap
     no_progress_info_gain_threshold: 0.05 # low progress when info_gain <= this value; at 0, positive gains never qualify
     no_progress_rms_max_multiplier: 3.0 # >=1; restore removed positive norm within each tree; 1 disables rescaling; terminals are excluded
