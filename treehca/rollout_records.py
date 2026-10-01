@@ -5,6 +5,17 @@ import math
 import numpy as np
 
 
+def compute_mean_response_entropy(entropys, response_mask):
+    """Return per-row token entropy means in nats, or None for empty responses."""
+    mask = response_mask.bool()
+    counts = mask.sum(dim=-1)
+    means = entropys.detach().float().masked_fill(~mask, 0).sum(dim=-1) / counts.clamp_min(1)
+    return np.asarray(
+        [mean if count else None for mean, count in zip(means.cpu().tolist(), counts.cpu().tolist())],
+        dtype=object,
+    )
+
+
 def capture_step_logging(*, next_obs, infos, dones, is_last_step):
     """Snapshot diagnostics before frontier slots are reused; do not change decisions."""
     reasons = []
@@ -88,7 +99,7 @@ def build_rollout_fields(non_tensor_batch, tensor_batch=None):
     fields = {
         "node_path": paths,
     }
-    for name in ("avg_ans_log_probs", "info_gain", "info_gain_sum", "page_type"):
+    for name in ("avg_ans_log_probs", "info_gain", "info_gain_sum", "page_type", "mean_entropy"):
         fields[name] = [_json_value(value) for value in non_tensor_batch.get(name, [None] * len(node_uids))]
     columns = (
         "uid",

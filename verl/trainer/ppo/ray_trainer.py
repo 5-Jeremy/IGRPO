@@ -63,6 +63,7 @@ from verl.workers.rollout.async_server import AsyncLLMServerManager
 from gigpo import core_gigpo
 from igpo import core_igpo
 from treehca import core_treehca
+from treehca.rollout_records import compute_mean_response_entropy
 from verl.utils.advantage_estimator import AdvantageEstimator
 from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 
@@ -1321,6 +1322,7 @@ class RayPPOTrainer:
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
+                        batch.non_tensor_batch["mean_entropy"] = compute_mean_response_entropy(entropys, response_masks)
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
                         entropy_loss = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
                         old_log_prob_metrics = {"actor/entropy_loss": entropy_loss.detach().item()}

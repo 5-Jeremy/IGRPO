@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from treehca.rollout_records import build_treehca_rollout_fields, capture_branch_logging
+from treehca.rollout_records import build_treehca_rollout_fields, capture_branch_logging, compute_mean_response_entropy
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 
 
@@ -51,6 +51,60 @@ def test_other_algorithm_dump_keeps_step(tmp_path):
     RayPPOTrainer._dump_generations(trainer, ["prompt"], ["answer"], [1], {}, str(tmp_path))
     row = json.loads((tmp_path / "3.jsonl").read_text())
     assert row["step"] == 3
+
+
+def test_mean_entropy_masks_padding_and_survives_dump_and_visualization(tmp_path):
+    from treehca.visualizer.data import graph_elements, load_file
+    from treehca.visualizer.presentation import detail_fields
+
+    # Reordered nodes, differing lengths, nonfinite padding, and an empty response.
+    entropy = torch.tensor([[2., float("nan"), 4.], [float("inf"), 0., 999.], [999., 999., 999.]], requires_grad=True)
+    mask = torch.tensor([[1, 0, 1], [0, 1, 0], [0, 0, 0]])
+    batch = {
+        "uid": ["group"] * 3,
+        "node_uid": ["child", "parent", "empty"],
+        "parent_node_uid": ["parent", "root", "root"],
+        "mean_entropy": compute_mean_response_entropy(entropy, mask),
+    }
+    fields = build_treehca_rollout_fields(batch, {"response_mask": mask})
+    assert fields["mean_entropy"] == [3., 0., None]
+    json.dumps(fields, allow_nan=False)
+    RayPPOTrainer._dump_generations(SimpleNamespace(global_steps=1), ["p"] * 3, ["a"] * 3, [0] * 3, {}, str(tmp_path), rollout_fields=fields)
+    tree = load_file(tmp_path / "1.jsonl").trees[0]
+    for uid, expected in zip(batch["node_uid"], [3., 0., None]):
+        node = tree.nodes[uid]
+        assert detail_fields(node, node.records[0])["mean_entropy"] == expected
+    elements, limits = graph_elements(tree, "mean_entropy")
+    assert limits == (0., 3.)
+    colors = {element["data"]["id"]: element["data"]["color"] for element in elements if "position" in element}
+    assert colors["child"] != colors["parent"]
+    assert colors["empty"] == colors["root"] == "#e2e8f0"
+    assert build_treehca_rollout_fields({k: v for k, v in batch.items() if k != "mean_entropy"})["mean_entropy"] == [None] * 3
+
+
+@pytest.mark.parametrize("calculate_entropy", [False, True])
+def test_dynamic_log_prob_batching_restores_entropy_row_order(monkeypatch, calculate_entropy):
+    from verl import DataProto
+    from verl.utils.debug import performance
+    from verl.workers.actor import dp_actor
+
+    # The GPU-memory logging decorator is unrelated to this CPU ordering check.
+    monkeypatch.setattr(performance, "_get_current_mem_info", lambda: ("0", "0", "0", "0"))
+    actor = object.__new__(dp_actor.DataParallelPPOActor)
+    actor.actor_module = torch.nn.Identity()
+    actor.ulysses_sequence_parallel_size = 1
+    actor._forward_micro_batch = lambda batch, **kwargs: (batch["responses"].float() + 10, batch["responses"].float())
+    data = DataProto.from_dict(
+        tensors={key: torch.tensor([[1, 2], [3, 4], [5, 6]]) for key in ("responses", "input_ids", "attention_mask", "position_ids")},
+        meta_info={"micro_batch_size": 2, "temperature": 1., "use_dynamic_bsz": True, "max_token_len": 6},
+    )
+    monkeypatch.setattr(dp_actor, "rearrange_micro_batches", lambda batch, **kwargs: ([batch[[2, 0]], batch[[1]]], [[2, 0], [1]]))
+    log_probs, entropy = actor.compute_log_prob(data, calculate_entropy=calculate_entropy)
+    assert torch.equal(log_probs, data.batch["responses"].float())
+    if calculate_entropy:
+        assert torch.equal(entropy, data.batch["responses"].float() + 10)
+    else:
+        assert entropy is None
 
 
 @pytest.mark.parametrize("last", [False, True])

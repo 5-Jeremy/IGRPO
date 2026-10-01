@@ -84,6 +84,24 @@ def test_layout_follows_ancestry_and_handles_nonfinite_metrics(tmp_path):
     assert len(elements) == 7
 
 
+def test_mean_entropy_is_visible_and_available_for_metric_coloring(tmp_path):
+    from treehca.visualizer.app import create_app
+    from treehca.visualizer.presentation import detail_fields
+
+    path = write_rows(tmp_path / "1.jsonl", [row("a", mean_entropy=0.5), row("b", ["a"], mean_entropy=2.0), row("c", mean_entropy=None)])
+    tree = load_file(path).trees[0]
+    node = tree.nodes["a"]
+    assert detail_fields(node, node.records[0])["mean_entropy"] == 0.5
+    elements, limits = graph_elements(tree, "mean_entropy")
+    assert limits == (0.5, 2.0)
+    colors = {e["data"]["id"]: e["data"]["color"] for e in elements if "position" in e}
+    assert colors["a"] != colors["b"]
+    assert colors["c"] == "#e2e8f0"
+    app = create_app(tmp_path)
+    select = next(value["callback"].__wrapped__ for key, value in app.callback_map.items() if "metric.options" in key)
+    assert {"label": "mean_entropy", "value": "mean_entropy"} in select("1.jsonl", 0, 0)[-1]
+
+
 def test_partial_json_reports_error_and_can_be_retried(tmp_path):
     path = tmp_path / "1.jsonl"
     path.write_text('{"node_path":', encoding="utf-8")
