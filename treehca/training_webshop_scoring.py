@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 import time
@@ -17,6 +18,7 @@ from treehca.product_page_parser import extract_product_page_contexts, parse_pro
 from treehca.pseudo_rollout_product_page import GROUP_NONE_ACTION, _build_product_page_prompt
 from treehca.pseudo_rollout_results_page import prepare_response_suffix_probe, prepare_results_page_answer_probe
 from treehca.training_pseudo_probes import TrainingProductOptionProbe, TrainingPseudoProbeScorer
+from treehca.webshop_option_success import build_native_option_score_plan
 from treehca.webshop_probability_snapshot import WebshopSnapshotSource
 from treehca.webshop_turn_success import WebshopTurnSuccessScorer
 
@@ -85,11 +87,23 @@ def resolve_treehca_scorer(config):
 class TrainingWebshopTurnSuccessScorer(WebshopTurnSuccessScorer):
     """Separate training specialization; the standalone scorer stays unchanged."""
 
-    def __init__(self, *args, prune_unsuccessful_choices=True, **kwargs):
+    def __init__(self, *args, prune_unsuccessful_choices=True, include_partial_scores=False, **kwargs):
         super().__init__(*args, **kwargs)
         if not isinstance(prune_unsuccessful_choices, bool):
             raise ValueError("prune_unsuccessful_choices must be a boolean")
         self.prune_unsuccessful_choices = prune_unsuccessful_choices
+        if not isinstance(include_partial_scores, bool):
+            raise ValueError("include_partial_scores must be a boolean")
+        self.include_partial_scores = include_partial_scores
+
+    def _plan(self, snapshot, asin, selected):
+        if not self.include_partial_scores:
+            return super()._plan(snapshot, asin, selected)
+        key = (snapshot.query_key, asin, selected)
+        if key not in self._plans:
+            server = self.source.server
+            self._plans[key] = build_native_option_score_plan(server.product_item_dict[asin], json.loads(snapshot.goal_json), server.product_prices[asin], dict(selected))
+        return self._plans[key]
 
     def _request_fits(self, prompt, response):
         check = getattr(self.probe_scorer, "request_fits", None)
@@ -165,7 +179,7 @@ class TrainingWebshopTurnSuccessScorer(WebshopTurnSuccessScorer):
             prompt_ids = None
             scored_pairs = [(action, name) for action, name in zip(planned.actions, names) if action in useful[planned.name]]
             if not scored_pairs:
-                raise ValueError(f"No full-reward choice is available for option group {planned.name!r}")
+                raise ValueError(f"No rewarding choice is available for option group {planned.name!r}")
             response_prefix = f"<think> The best choice for the {group.name} group is "
             for _, name in scored_pairs:
                 answer = prepare_response_suffix_probe(prompt, response_prefix, name, tokenizer, prompt_token_ids=prompt_ids)
@@ -189,7 +203,7 @@ class WebshopInfoGainScorer:
     tensor output. The explicit scored mask must be consulted by the caller.
     """
 
-    def __init__(self, tokenizer, actor_rollout_wg, *, max_model_len, path_probability_threshold=1e-3, batch_size=32, apply_chat_template_kwargs=None, prune_unsuccessful_choices=True):
+    def __init__(self, tokenizer, actor_rollout_wg, *, max_model_len, path_probability_threshold=1e-3, batch_size=32, apply_chat_template_kwargs=None, prune_unsuccessful_choices=True, include_partial_scores=False):
         # Import native rendering only on the WebShop training path.
         native_root = Path(__file__).resolve().parents[1] / "agent_system/environments/env_package/webshop/webshop"
         if str(native_root) not in sys.path:
@@ -200,6 +214,9 @@ class WebshopInfoGainScorer:
         if not isinstance(prune_unsuccessful_choices, bool):
             raise ValueError("prune_unsuccessful_choices must be a boolean")
         self.prune_unsuccessful_choices = prune_unsuccessful_choices
+        if not isinstance(include_partial_scores, bool):
+            raise ValueError("include_partial_scores must be a boolean")
+        self.include_partial_scores = include_partial_scores
         self.scorers = {}
         self.cache_reuses = 0
         self.scoring_time_seconds = 0.0
@@ -249,7 +266,7 @@ class WebshopInfoGainScorer:
                 if key not in self.scorers:
                     source = WebshopSnapshotSource(SimpleNamespace(product_item_dict={}, product_prices={}, show_attrs=payload["show_attrs"]))
                     source.catalog_key = key
-                    self.scorers[key] = TrainingWebshopTurnSuccessScorer(source, self.probes, path_probability_threshold=self.threshold, prune_unsuccessful_choices=self.prune_unsuccessful_choices)
+                    self.scorers[key] = TrainingWebshopTurnSuccessScorer(source, self.probes, path_probability_threshold=self.threshold, prune_unsuccessful_choices=self.prune_unsuccessful_choices, include_partial_scores=self.include_partial_scores)
                 self.scorers[key].add_catalog_payload(payload)
                 groups[key].append((index, snapshot))
         for key, rows in groups.items():

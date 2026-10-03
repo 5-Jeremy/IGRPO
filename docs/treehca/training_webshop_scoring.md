@@ -174,12 +174,15 @@ environments retain their existing zero root baseline and gain computation.
   Teacher forcing sums log probabilities for tokens overlapping the choice
   name. The preceding text provides context but does not enter that sum,
   unless a token merges it with part of the choice. The raw joint probabilities of
-  full-reward choice combinations are summed for native reward aggregation.
+  rewarding choice combinations are summed for native reward aggregation,
+  with the weighting controlled by `webshop_include_partial_scores` below.
 - `algorithm.treehca.webshop_prune_unsuccessful_choices` defaults to `true`.
   It scores only option names that occur in at least one full-reward purchase
   combination, using the native option-coverage plan. Set it to `false` to
   score every displayed option and `none`; choices outside full-reward
-  combinations still contribute zero to the final probability.
+  combinations still contribute zero to the final probability in the default
+  mode. With partial scores enabled, pruning instead keeps choices belonging
+  to at least one **positive-score** combination.
 - Identical teacher-forcing requests are deduplicated per stage. Up to
   `algorithm.treehca.webshop_probe_batch_size` unique rows (default 32) are
   submitted per call, followed by any required worker-divisibility padding.
@@ -221,6 +224,133 @@ receives a separate prompt and set of probes.
 The context limit is `actor_rollout_ref.rollout.max_model_len`, falling back
 to `data.max_prompt_length + data.max_response_length` when unset. Pruning uses
 `algorithm.treehca.webshop_path_probability_threshold` (default `1e-3`).
+
+## Optional partial-score weighting
+
+Enable this training-only mode with the existing Hydra configuration key:
+
+```bash
+algorithm.treehca.webshop_include_partial_scores=true
+```
+
+The default is `false`, preserving perfect-purchase scoring. Both
+`WebshopInfoGainScorer` and `TrainingWebshopTurnSuccessScorer` also accept the
+Boolean keyword `include_partial_scores`. The rollout collector forwards the
+configuration to the adapter, which forwards it to each catalog scorer.
+Non-Boolean values raise `ValueError`.
+
+With this setting enabled, the compatibility field
+`webshop_success_probability` contains **native-score-weighted pseudo mass**,
+and `avg_ans_log_probs` contains its logarithm. It is no longer specifically
+the probability of a perfect purchase. Actual environment-terminal rows still
+use the observed binary `webshop_won` outcome, and training purchase rewards
+and terminal penalties retain their behavior described below. This option
+changes the nonterminal page estimates.
+
+For a product with unresolved groups `G`, let `p_g(a)` be the raw
+teacher-forced probability for choice `a` in group `g`, and let `R(c)` be
+WebShop's native purchase reward for the combined choices `c`. The estimate is
+
+```text
+S(product) = sum over combinations c [R(c) * product over g in G p_g(c_g)]
+S(results) = sum over retained visible products i [p_entry(i) * S(i)]
+```
+
+`R(c)` includes product type, attribute matches, native price eligibility,
+and option matches; it is not a fraction invented by the scorer. A product
+whose best configuration earns a positive partial score is eligible for
+entry probes. A product whose maximum native score is zero is excluded.
+The existing entry-probability threshold is applied to `p_entry(i)` before
+option probes; it is not applied to reward-weighted mass or option choices.
+Final estimates retain the existing clamp to `[0, 1]`.
+
+Writing `M_i = max_c R_i(c)`, a retained product's contribution can also be
+expressed as `p_entry(i) * M_i * sum_c [(R_i(c)/M_i) * product_g p_g(c_g)]`.
+The code directly sums `R_i(c)` instead of dividing and multiplying by `M_i`;
+this applies the maximum-score weight exactly once. Before option factors,
+its entry contribution is `p_entry(i) * M_i`.
+
+The implementation in
+[`webshop_option_success.py`](../../treehca/webshop_option_success.py) is specific
+about combinations:
+
+1. `build_native_option_score_plan` uses native `get_option_reward` fuzzy
+   matching to map each displayed option to a bit mask of requested targets
+   it satisfies. These are target matches across groups, following native
+   reward semantics; overlapping matches are counted only once. Each mutable
+   group also has `none`, whose mask preserves that group's current selection
+   (zero for a fresh entry).
+2. It builds reachable masks with one concrete selection witness per mask,
+   and evaluates native `get_reward` on those witnesses to populate
+   `scores_by_mask` and `max_score`. Native reward depends on the union of
+   matched targets, so configurations sharing a mask share a score. This
+   avoids enumerating the Cartesian option grid; the state space is bounded
+   by `2 ** number_of_requested_targets`.
+3. Already selected values matching a target are held fixed only when they
+   allow a maximum-score completion. A matching selection that blocks the
+   best achievable score remains mutable. Groups whose choices cannot change
+   reward are omitted. If every reachable configuration has the same score,
+   the plan returns that score directly without option probes, including
+   products with no options or no requested option targets.
+4. When `webshop_prune_unsuccessful_choices=true`, the plan's
+   `successful_actions()` keeps any choice occurring in a positive-reward
+   completion. Wrong choices and `none` often remain because product/price/
+   attribute credit, or another group's correct choice, gives their
+   combination positive reward. Pruning disabled scores all choices in the
+   required groups. Zero-reward combinations contribute zero either way.
+5. `NativeOptionScorePlan.aggregate_success_mass` starts with mass one on
+   the fixed coverage mask. For each required group it multiplies existing
+   mass by each probed choice's raw probability, merges equal union masks
+   with `math.fsum`, then sums `mass(mask) * scores_by_mask[mask]`.
+   Group choices are treated as independent, as in the original estimator.
+   No normalization or `1 - P(correct)` substitution occurs. An unprobed
+   choice has zero mass; missing answer mass does not receive partial credit.
+6. The inherited search aggregation multiplies entry probability by this
+   product estimate. Fresh-entry and results caches store the weighted value
+   for the scorer's fixed mode and are still cleared on policy-version changes.
+   Configured pages retain selection-specific plans and do not overwrite the
+   fresh-entry score.
+
+For an independent worked example, suppose a backpack request specifies two
+attributes, a price limit, and three option targets: oval shape, large size,
+and 30-liter capacity. A candidate meets one attribute and the price limit,
+has native type multiplier one, and offers all three target options. The
+native denominator is `2 attributes + 3 option targets + 1 price = 6`.
+Its reward is `(2 + number_of_matched_option_targets) / 6`, so its maximum is
+`5/6` despite all option targets being achievable.
+
+Assume these probe probabilities, chosen to sum to one per group for this
+arithmetic example:
+
+| Group | Target choice | Other choice | `none` |
+| --- | ---: | ---: | ---: |
+| Shape | oval: 0.60 | round: 0.25 | 0.15 |
+| Size | large: 0.50 | small: 0.30 | 0.20 |
+| Capacity | 30 liters: 0.40 | 20 liters: 0.40 | 0.20 |
+
+The nine distinct labels create 27 configurations. Merging the other choice
+and `none` for display gives the following eight coverage states; the code
+adds their separately probed masses when they share a mask.
+
+| Matched targets | Joint mass | Native score |
+| --- | ---: | ---: |
+| None | 0.12 | 2/6 |
+| Shape only | 0.18 | 3/6 |
+| Size only | 0.12 | 3/6 |
+| Capacity only | 0.08 | 3/6 |
+| Shape and size | 0.18 | 4/6 |
+| Shape and capacity | 0.12 | 4/6 |
+| Size and capacity | 0.08 | 4/6 |
+| All three | 0.12 | 5/6 |
+
+Thus the product estimate is
+`0.12*(2/6) + 0.38*(3/6) + 0.38*(4/6) + 0.12*(5/6) = 7/12`.
+If its entry probability is `0.24`, the pre-option weighted contribution is
+`0.24 * (5/6) = 0.20`. The score relative to its maximum, after accounting for
+options, is `(7/12)/(5/6) = 0.70`, giving final results-page contribution
+`0.20 * 0.70 = 0.14`, equivalently `0.24 * (7/12)`. The maximum score is not
+multiplied a second time. In actual probing, group masses need not sum to
+one; the same sum of products uses the measured raw values.
 
 ## Native state and branching
 

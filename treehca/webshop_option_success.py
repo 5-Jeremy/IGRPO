@@ -47,6 +47,14 @@ class NativeOptionSuccessPlan:
         """Sum raw action probabilities over full-coverage combinations only."""
         if self.constant_probability is not None:
             return self.constant_probability
+        masses = self._coverage_masses(distributions)
+        return self._score_coverage_masses(masses)
+
+    def _score_coverage_masses(self, masses: Mapping[int, float]) -> float:
+        return min(1.0, max(0.0, masses.get(self.full_mask, 0.0)))
+
+    def _coverage_masses(self, distributions: Mapping[str, Mapping[str, float]]) -> dict[int, float]:
+        """Combine independent raw probes, merging equal native coverage states."""
         if set(distributions) != {group.name for group in self.groups}:
             raise ValueError("Every required option group must have exactly one distribution")
         masses = {self.fixed_mask: 1.0}
@@ -63,7 +71,7 @@ class NativeOptionSuccessPlan:
                             raise ValueError("Option probabilities must be finite and in [0, 1]")
                         next_masses[covered | mask].append(mass * probability)
             masses = {mask: math.fsum(terms) for mask, terms in next_masses.items()}
-        return min(1.0, max(0.0, masses.get(self.full_mask, 0.0)))
+        return masses
 
     def aggregate(self, distributions: Mapping[str, Mapping[str, float]]) -> float:
         if self.constant_probability is not None:
@@ -83,7 +91,7 @@ class NativeOptionSuccessPlan:
                 for mask, probability in zip(group.masks, probabilities):
                     next_masses[covered | mask].append(mass * probability)
             masses = {mask: math.fsum(terms) for mask, terms in next_masses.items()}
-        return min(1.0, max(0.0, masses.get(self.full_mask, 0.0)))
+        return self._score_coverage_masses(masses)
 
 
 def build_native_option_success_plan(item: Mapping[str, Any], goal: Mapping[str, Any], price: float, selected_options: Mapping[str, str]) -> NativeOptionSuccessPlan:
@@ -155,3 +163,107 @@ def build_native_option_success_plan(item: Mapping[str, Any], goal: Mapping[str,
         if any(covered != full_mask and any((covered | mask) == full_mask for mask in group.masks) for covered in others):
             required.append(group)
     return NativeOptionSuccessPlan(tuple(required), fixed_mask, full_mask)
+
+
+@dataclass(frozen=True)
+class NativeOptionScorePlan(NativeOptionSuccessPlan):
+    """Native reward for every reachable coverage state, including partial ones."""
+
+    scores_by_mask: Mapping[int, float] | None = None
+    max_score: float = 0.0
+
+    def successful_actions(self) -> dict[str, tuple[str, ...]]:
+        """Keep a choice if some completion containing it has positive reward."""
+        prefixes = [{self.fixed_mask}]
+        for group in self.groups:
+            prefixes.append({covered | mask for covered in prefixes[-1] for mask in group.masks})
+        suffixes = [set() for _ in range(len(self.groups) + 1)]
+        suffixes[-1] = {0}
+        for index in range(len(self.groups) - 1, -1, -1):
+            suffixes[index] = {covered | mask for covered in suffixes[index + 1] for mask in self.groups[index].masks}
+        return {
+            group.name: tuple(action for action, mask in zip(group.actions, group.masks) if any(self.scores_by_mask[left | mask | right] > 0 for left in prefixes[index] for right in suffixes[index + 1]))
+            for index, group in enumerate(self.groups)
+        }
+
+    def _score_coverage_masses(self, masses: Mapping[int, float]) -> float:
+        """Sum each combination's raw probability times its actual native score."""
+        return min(1.0, max(0.0, math.fsum(mass * self.scores_by_mask[mask] for mask, mass in masses.items())))
+
+
+def build_native_option_score_plan(item: Mapping[str, Any], goal: Mapping[str, Any], price: float, selected_options: Mapping[str, str]) -> NativeOptionScorePlan:
+    """Plan partial/full native rewards without enumerating the option grid.
+
+    Native reward depends on the union of matched option targets, not which
+    groups supplied them. Evaluate one native witness per reachable mask.
+    Preserve already matching selections when a maximum-score completion is
+    still possible. For mutable groups, none preserves the current selection.
+    """
+    from web_agent_site.engine.goal import get_option_reward, get_reward
+
+    targets = tuple(goal["goal_options"].items()) if isinstance(goal["goal_options"], dict) else tuple(goal["goal_options"])
+    full_mask = (1 << len(targets)) - 1
+    options = item.get("options", {})
+    names = {name.lower(): name for name in options}
+    selected = {names.get(name.lower(), name): value.lower() for name, value in selected_options.items()}
+    if any(name not in options or value not in [v.lower() for v in options[name]] for name, value in selected.items()):
+        raise ValueError("Selected options must be valid choices for this product")
+
+    def coverage(value):
+        return sum(1 << index for index, target in enumerate(targets) if get_option_reward((value.lower(),), (target,))[1] == 1)
+
+    groups = tuple(
+        OptionCoverageGroup(name, tuple(f"click[{value}]" for value in dict.fromkeys(values)) + (GROUP_NONE_ACTION,), tuple(coverage(value) for value in dict.fromkeys(values)) + (coverage(selected[name]) if name in selected else 0,))
+        for name, values in options.items()
+    )
+
+    def witnesses_for(fixed):
+        fixed_mask = 0
+        for value in fixed.values():
+            fixed_mask |= coverage(value)
+        witnesses = {fixed_mask: dict(fixed)}
+        for group in groups:
+            if group.name in fixed:
+                continue
+            updated = {}
+            for covered, selection in witnesses.items():
+                for action, mask in zip(group.actions, group.masks):
+                    choice = dict(selection)
+                    if action != GROUP_NONE_ACTION:
+                        choice[group.name] = action[6:-1].lower()
+                    elif group.name in selected:
+                        choice[group.name] = selected[group.name]
+                    updated.setdefault(covered | mask, choice)
+            witnesses = updated
+        return fixed_mask, witnesses
+
+    _, witnesses = witnesses_for({})
+    scores = {mask: float(get_reward(item, goal, price=price, options=choice)) for mask, choice in witnesses.items()}
+    max_score = max(scores.values())
+    if max_score == 0:
+        return NativeOptionScorePlan((), 0, full_mask, 0.0, scores, max_score)
+    fixed = {}
+    for group in groups:
+        value = selected.get(group.name)
+        if value is not None and coverage(value):
+            candidate = {**fixed, group.name: value}
+            if max(scores[mask] for mask in witnesses_for(candidate)[1]) == max_score:
+                fixed = candidate
+    fixed_mask, reachable = witnesses_for(fixed)
+    if len({scores[mask] for mask in reachable}) == 1:
+        return NativeOptionScorePlan((), fixed_mask, full_mask, scores[next(iter(reachable))], scores, max_score)
+
+    mutable = tuple(group for group in groups if group.name not in fixed)
+    required = []
+    for group in mutable:
+        others = {fixed_mask}
+        for other in mutable:
+            if other.name != group.name:
+                others = {covered | mask for covered in others for mask in other.masks}
+        if any(scores[covered | mask] != scores[covered | group.masks[-1]] for covered in others for mask in group.masks):
+            required.append(group)
+    # Irrelevant groups are left untouched; their none masks may be nonzero.
+    for group in mutable:
+        if group not in required:
+            fixed_mask |= group.masks[-1]
+    return NativeOptionScorePlan(tuple(required), fixed_mask, full_mask, None, scores, max_score)

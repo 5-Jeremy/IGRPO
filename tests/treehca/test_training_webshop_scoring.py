@@ -1,6 +1,9 @@
 """Training transport and teacher-forcing contracts without model weights."""
 
 import math
+import copy
+import itertools
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -11,14 +14,14 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from treehca.product_page_parser import ProductOptionGroup, extract_product_page_contexts
-from treehca.pseudo_rollout_product_page import ProductOptionGroupPseudoRollout
+from treehca.pseudo_rollout_product_page import ActionChoiceScore, ProductOptionGroupPseudoRollout, ProductPagePseudoRolloutScores
 from treehca.pseudo_rollout_product_page_grouped_choices_testbed import sample_diverse_product_goals
 from treehca.pseudo_rollout_product_page_outcomes_testbed import _DEFAULT_ATTRIBUTES, _DEFAULT_CATALOG, construct_start_episode, create_server
 from treehca.pseudo_rollout_results_page import ResultsPageAnswerProbe, prepare_results_page_answer_probe
 from treehca.training_pseudo_probes import TrainingPseudoProbeScorer
 from treehca.training_webshop_env import TreeHCAWebshopWorker
 from treehca.training_webshop_scoring import TrainingWebshopTurnSuccessScorer, WebshopInfoGainScorer, _render_scoring_prompt, resolve_treehca_scorer
-from treehca.webshop_option_success import NativeOptionSuccessPlan, OptionCoverageGroup
+from treehca.webshop_option_success import NativeOptionSuccessPlan, OptionCoverageGroup, build_native_option_score_plan
 from treehca.webshop_probability_snapshot import WebshopTurnSnapshot
 from treehca.webshop_turn_success import _ProductJob
 from verl import DataProto
@@ -454,3 +457,156 @@ def test_rollout_loop_dispatch_terminal_values_and_missing_score_error(terminate
     else:
         with pytest.raises(ValueError, match="unsupported_page:index"):
             collector.vanilla_multi_turn_loop_with_tree_structure(gen_batch, Actor(), Environment())
+
+
+def test_partial_score_setting_defaults_off_and_requires_boolean():
+    assert WebshopInfoGainScorer(SimpleNamespace(), FakeActor(), max_model_len=64).include_partial_scores is False
+    assert WebshopInfoGainScorer(SimpleNamespace(), FakeActor(), max_model_len=64, include_partial_scores=True).include_partial_scores is True
+    with pytest.raises(ValueError, match="include_partial_scores"):
+        WebshopInfoGainScorer(SimpleNamespace(), FakeActor(), max_model_len=64, include_partial_scores="true")
+    with pytest.raises(ValueError, match="include_partial_scores"):
+        TrainingWebshopTurnSuccessScorer(SimpleNamespace(), SimpleNamespace(), include_partial_scores=1)
+
+
+@pytest.fixture
+def partial_product(native_training):
+    episode, _ = native_training
+    asin = episode.env.server.user_sessions[episode.env.session]["asin"]
+    item = copy.deepcopy(episode.env.server.product_item_dict[asin])
+    item.update(name="travel backpack", Title="Travel Backpack", query="backpack", product_category="Bags › Backpacks", Attributes=["waterproof"], BulletPoints=[], Description="", options={"shape": ["oval", "round"], "size": ["large", "small"]})
+    goal = copy.deepcopy(episode.env.server.user_sessions[episode.env.session]["goal"])
+    goal.update(name="travel backpack", query="backpack", product_category="Bags › Backpacks", attributes=["waterproof", "durable"], price_upper=100, goal_options={"shape": "oval", "size": "large"})
+    return item, goal
+
+
+def test_partial_option_scores_include_wrong_choices_and_none_without_normalizing(partial_product):
+    item, goal = partial_product
+    plan = build_native_option_score_plan(item, goal, 50, {})
+    assert plan.max_score == pytest.approx(0.8)
+    assert plan.constant_probability is None
+    assert plan.successful_actions() == {group.name: group.actions for group in plan.groups}
+    distributions = {"shape": {"click[oval]": 0.3, "click[round]": 0.1, "none": 0.1}, "size": {"click[large]": 0.2, "click[small]": 0.15, "none": 0.15}}
+    # Joint mass is 0.25, not 1. Each of the nine combinations has native
+    # score 0.8, 0.6, or 0.4. Missing raw answer mass contributes nothing.
+    assert plan.aggregate_success_mass(distributions) == pytest.approx(0.15)
+    normalized = {name: {action: probability / 0.5 for action, probability in choices.items()} for name, choices in distributions.items()}
+    assert plan.aggregate(normalized) == pytest.approx(0.6)
+    with pytest.raises(ValueError, match="unknown choice"):
+        plan.aggregate_success_mass({**distributions, "shape": {"click[triangle]": 0.1}})
+    with pytest.raises(ValueError, match="finite"):
+        plan.aggregate_success_mass({**distributions, "shape": {"none": math.nan}})
+
+
+@pytest.mark.parametrize("variant", ["ordinary", "unreachable", "expensive", "zero_type", "overlap", "selected", "blocking", "no_options", "no_targets"])
+def test_partial_plan_matches_native_cartesian_reward_oracle(partial_product, variant):
+    from web_agent_site.engine.goal import get_reward
+
+    item, goal = partial_product
+    selected, price = {}, 50
+    if variant == "unreachable":
+        goal["goal_options"]["size"] = "giant"
+    elif variant == "expensive":
+        price = 200
+    elif variant == "zero_type":
+        item["name"] = "spatula"
+    elif variant == "overlap":
+        item["options"] = {"first": ["shape oval size large", "shape oval"], "second": ["shape oval", "size small"]}
+    elif variant == "selected":
+        selected = {"shape": "oval", "size": "small"}
+    elif variant == "blocking":
+        item["options"] = {"configuration": ["shape oval", "shape oval size large"]}
+        selected = {"configuration": "shape oval"}
+    elif variant == "no_options":
+        item["options"] = {}
+    elif variant == "no_targets":
+        goal["goal_options"] = {}
+    plan = build_native_option_score_plan(item, goal, price, selected)
+    distributions = {group.name: dict(zip(group.actions, [0.7 / len(group.actions)] * len(group.actions))) for group in plan.groups}
+    mutable = set(distributions)
+    fixed = {name: value for name, value in selected.items() if name not in mutable}
+    scores, weighted = [], []
+    for choices in itertools.product(*(tuple(distributions[group.name].items()) for group in plan.groups)):
+        options = dict(fixed)
+        for group, (action, _) in zip(plan.groups, choices):
+            if action == "none":
+                if group.name in selected:
+                    options[group.name] = selected[group.name]
+            else:
+                options[group.name] = action[6:-1].lower()
+        reward = float(get_reward(item, goal, price, options))
+        scores.append(reward)
+        weighted.append(reward * math.prod(probability for _, probability in choices))
+    assert plan.max_score == pytest.approx(max(scores))
+    assert plan.aggregate_success_mass(distributions) == pytest.approx(math.fsum(weighted))
+
+
+def test_partial_pruning_keeps_only_positive_reward_completions(partial_product):
+    item, goal = partial_product
+    item["Attributes"] = []
+    plan = build_native_option_score_plan(item, goal, 200, {})
+    # Neither target gives zero, but a wrong shape can accompany the right
+    # size, and vice versa. Those wrong choices must not be pruned.
+    assert plan.successful_actions() == {group.name: group.actions for group in plan.groups}
+    item["options"].pop("size")
+    plan = build_native_option_score_plan(item, goal, 200, {})
+    assert plan.successful_actions() == {"shape": ("click[oval]",)}
+    assert plan.aggregate_success_mass({"shape": {"click[oval]": 0.3}}) == pytest.approx(0.06)
+
+
+@pytest.mark.parametrize("include_partial,prune,threshold", [(False, True, 0), (True, True, 0), (True, False, 0), (True, True, 0.21)])
+def test_partial_results_weight_products_once_and_share_cache(partial_product, native_training, monkeypatch, include_partial, prune, threshold):
+    from agent_system.environments.prompts.webshop import WEBSHOP_TEMPLATE_NO_HIS
+
+    item, goal = partial_product
+    _, tokenizer = native_training
+    partial = dict(item, asin="B000PART01")
+    full = dict(item, asin="B000FULL01", Attributes=["waterproof", "durable"])
+    constant = dict(item, asin="B000CONST1", options={})
+    zero = dict(item, asin="B000ZERO01", name="spatula")
+    products = {product["asin"]: product for product in (partial, full, constant, zero)}
+    goal["instruction_text"] = "Find a durable waterproof travel backpack, oval and large."
+    actions = tuple(f"click[{asin.lower()}]" for asin in products)
+    prompt = WEBSHOP_TEMPLATE_NO_HIS.format(task_description=goal["instruction_text"], current_observation="Search results", available_actions="\n".join(f"'{action}'," for action in actions))
+    snapshot = WebshopTurnSnapshot("partial-catalog", json.dumps(goal), goal["instruction_text"], prompt, "search_results", visible_asins=tuple(products))
+    payload = dict(snapshot=snapshot, products=products, prices={asin: 50 for asin in products}, show_attrs=False)
+    scorer = WebshopInfoGainScorer(tokenizer, FakeActor(), max_model_len=32768, path_probability_threshold=threshold, include_partial_scores=include_partial, prune_unsuccessful_choices=prune)
+    seen = []
+    entries = {"B000PART01": 0.25, "B000FULL01": 0.2, "B000CONST1": 0.1}
+    probabilities = {"click[oval]": 0.3, "click[round]": 0.1, "click[large]": 0.2, "click[small]": 0.15, "none": 0.1}
+
+    def score(probes):
+        seen.extend(probes)
+        scores = []
+        for probe in probes:
+            if isinstance(probe, ResultsPageAnswerProbe):
+                response = tokenizer.decode(probe.response_token_ids).upper()
+                scores.append(next(probability for asin, probability in entries.items() if asin in response))
+            else:
+                # Size's none probability differs from shape's.
+                size = "click[large]" in probe.actions
+                choices = tuple(ActionChoiceScore(name, action, 0.15 if size and action == "none" else probabilities[action], 0, 0, 0) for name, action in zip(probe.option_names, probe.actions))
+                scores.append(ProductPagePseudoRolloutScores(choices))
+        return scores
+
+    monkeypatch.setattr(scorer.probes, "score", score)
+    batch = scorer.compute(info_batch([payload, payload]), policy_version=0)
+    expected = 0.25 * 0.15 + 0.2 * 0.2 + 0.1 * 0.4 if include_partial else 0.2 * 0.3 * 0.2
+    if threshold:
+        # Threshold the entry, not the maximum-score-weighted entry (0.20)
+        # or its final contribution (0.0375). Other branches stay excluded.
+        expected = 0.25 * 0.15
+    assert batch.non_tensor_batch["webshop_success_probability"].tolist() == pytest.approx([expected, expected])
+    assert torch.exp(batch.batch["avg_ans_log_probs"]).tolist() == pytest.approx([expected, expected])
+    assert scorer.scorers[snapshot.catalog_key].include_partial_scores == include_partial
+    if include_partial:
+        assert sum(isinstance(probe, ResultsPageAnswerProbe) for probe in seen) == 3
+        assert all(len(probe.actions) == 3 for probe in seen if not isinstance(probe, ResultsPageAnswerProbe))
+    before = len(seen)
+    source = scorer.scorers[snapshot.catalog_key].source
+    direct = dict(payload, snapshot=source.product_entry(snapshot, partial["asin"] if include_partial else full["asin"]))
+    direct_batch = scorer.compute(info_batch([direct]), policy_version=0)
+    assert direct_batch.non_tensor_batch["webshop_success_probability"][0] == pytest.approx(0.15 if include_partial else 0.06)
+    scorer.compute(info_batch([payload]), policy_version=0)
+    assert len(seen) == before
+    scorer.compute(info_batch([payload]), policy_version=1)
+    assert len(seen) > before

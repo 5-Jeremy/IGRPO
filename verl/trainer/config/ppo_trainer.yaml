@@ -263,7 +263,8 @@ algorithm:
     pseudo_scorer: auto # auto / answer_block / webshop; auto detects env.env_name
     webshop_path_probability_threshold: 1.0e-3
     webshop_probe_batch_size: 32 # unique teacher-forcing rows before worker padding
-    webshop_prune_unsuccessful_choices: true # score only options in a full-reward purchase combination
+    webshop_prune_unsuccessful_choices: true # score only options in a rewarding combination (full or partial according to the setting below)
+    webshop_include_partial_scores: false # weight partial/full option combinations by their native WebShop score
     credit: snis # snis: SNIS backup over children. q_hindsight: GRPO advantage + Q * (1 - 1/hindsight ratio)
     max_inv_ratio: 2.0 # q_hindsight only: clip 1/h, h = p_gt(node)/p_gt(parent). At 2.0 the aux term spans [-Q, +Q]
     grpo_weight: 0.7 # q_hindsight only: coefficient on the GRPO term, A = grpo_weight * A_grpo + q_weight * A_aux
