@@ -132,3 +132,8 @@ data/
 .tmp
 *ports
 
+.codex/
+analysis_scripts/
+rag_data/
+ray_tmp/
+runs/
