@@ -1,7 +1,9 @@
+import argparse
+import asyncio
 import json
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
-import argparse
 
 import faiss
 import torch
@@ -311,7 +313,7 @@ app = FastAPI()
 
 
 @app.post("/retrieve")
-def retrieve_endpoint(request: QueryRequest):
+async def retrieve_endpoint(request: QueryRequest):
     """
     Endpoint that accepts a single query and performs retrieval.
     Input format:
@@ -321,14 +323,14 @@ def retrieve_endpoint(request: QueryRequest):
       "return_scores": true
     }
     """
-    if not request.topk:
-        request.topk = config.retrieval_topk  # fallback to default
-
-    # Perform retrieval
+    topk = request.topk or config.retrieval_topk
+    retrieved = await asyncio.get_running_loop().run_in_executor(
+        search_executor, retriever.search, request.query, topk, request.return_scores
+    )
     if request.return_scores:
-        results, scores = retriever.search(query=request.query, num=request.topk, return_score=True)
+        results, scores = retrieved
     else:
-        results = retriever.search(query=request.query, num=request.topk, return_score=False)
+        results = retrieved
         scores = None
 
     # Format response
@@ -382,8 +384,8 @@ if __name__ == "__main__":
         retrieval_batch_size=512,  # this is unused in the current retrieval implementation, which only supports single query
     )
 
-    # 2) Instantiate a global retriever so it is loaded once and reused.
-    retriever = get_retriever(config)
-
-    # 3) Launch the server. By default, it listens on http://127.0.0.1:8000
-    uvicorn.run(app, host="0.0.0.0", port=args.port)
+    # GPU Faiss resources must be created and used by a single calling thread.
+    uses_gpu_index = config.faiss_gpu and config.retrieval_method != "bm25"
+    with ThreadPoolExecutor(max_workers=1 if uses_gpu_index else None) as search_executor:
+        retriever = search_executor.submit(get_retriever, config).result()
+        uvicorn.run(app, host="0.0.0.0", port=args.port)

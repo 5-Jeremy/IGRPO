@@ -25,7 +25,7 @@ val_data_size=1024
 group_size=5
 log_prob_micro_batch_size_per_gpu=32
 
-export CUDA_VISIBLE_DEVICES="0, 1, 2, 3"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES-0,1,2,3}"
 export MASTER_PORT=29510
 
 TRAIN_DATA="data/searchR1_processed_direct/train.parquet"
@@ -33,7 +33,7 @@ VAL_DATA="data/searchR1_processed_direct/val_subset.parquet"
 
 MODEL_PATH="HuggingFaceTB/SmolLM3-3B"
 PROJECT_NAME="search_adv_shaping"
-EXPERIMENT_NAME="SmolLM3-3B-igpo-adv-shaping"
+EXPERIMENT_NAME="SmolLM3-3B-igpo"
 DEBUG_DIR="tmp/debug_batches"
 
 python3 -m verl.trainer.main_ppo \
