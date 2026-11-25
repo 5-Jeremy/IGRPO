@@ -19,7 +19,6 @@ Self-contained for upstream verl-agent submission. Ensures adjust_batch() is cal
 *after* compute_advantage() so group-based adv (HGPO/GRPO/RLOO) runs on original batch order.
 """
 
-import json
 import os
 import uuid
 from collections import defaultdict
@@ -57,6 +56,7 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.metric import (
     reduce_metrics,
 )
+from verl.utils.rollout_logging import dump_generations
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -659,28 +659,11 @@ class RayPPOTrainer:
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
-    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path):
-        """Dump rollout/validation samples as JSONL."""
+    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path, rollout_metadata=None):
+        """Dump rollout/validation samples as JSONL with stable trajectory metadata."""
         os.makedirs(dump_path, exist_ok=True)
         filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
-
-        n = len(inputs)
-        base_data = {
-            "input": inputs,
-            "output": outputs,
-            "score": scores,
-            "step": [self.global_steps] * n,
-        }
-
-        for k, v in reward_extra_infos_dict.items():
-            if len(v) == n:
-                base_data[k] = v
-
-        with open(filename, "w") as f:
-            for i in range(n):
-                entry = {k: v[i] for k, v in base_data.items()}
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
+        dump_generations(filename, inputs, outputs, scores, reward_extra_infos_dict, rollout_metadata, step=self.global_steps)
         print(f"Dumped generations to {filename}")
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
@@ -1300,6 +1283,7 @@ class RayPPOTrainer:
                                 scores=scores,
                                 reward_extra_infos_dict=reward_extra_infos_dict,
                                 dump_path=rollout_data_dir,
+                                rollout_metadata=batch.non_tensor_batch,
                             )
 
                     # validate

@@ -85,3 +85,5 @@ verl = [
   "version/*",
   "trainer/config/*.yaml"
 ]
+agent_system = ["decision_model_inputs/*.json", "decision_model_inputs/*.txt"]
+rollout_visualizer = ["static/*.html", "static/*.css", "static/*.js"]

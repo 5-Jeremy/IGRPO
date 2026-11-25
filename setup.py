@@ -25,6 +25,7 @@ with open(os.path.join(version_folder, "verl/version/version")) as f:
 
 install_requires = [
     "accelerate",
+    "aiohttp>=3.9,<4",
     "codetiming",
     "datasets",
     "dill",
@@ -91,6 +92,8 @@ setup(
     package_data={
         "": ["version/*"],
         "verl": ["trainer/config/*.yaml"],
+        "agent_system": ["decision_model_inputs/*.json", "decision_model_inputs/*.txt"],
+        "rollout_visualizer": ["static/*.html", "static/*.css", "static/*.js"],
     },
     include_package_data=True,
     long_description=long_description,

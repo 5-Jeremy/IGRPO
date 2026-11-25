@@ -87,6 +87,74 @@ class TestComputeDataMetrics(unittest.TestCase):
             ]),
             "values": torch.tensor([[0.9, 1.0], [1.1, 1.2]]),
         }
+        self.batch.non_tensor_batch = {
+            "uid": np.array(["group", "group"]),
+            "traj_uid": np.array(["a", "b"]),
+            "episode_rewards": np.array([0.0, 1.0]),
+            "episode_lengths": np.array([2, 4]),
+            "episode_success": np.array([False, True]),
+            "tool_callings": np.zeros(2),
+        }
+
+    def test_successful_trajectory_lengths(self):
+        for successes, expected in [([False, True], (4, 4)),
+                                    ([True, True], (3, 4)),
+                                    ([False, False], (0, 0))]:
+            with self.subTest(successes=successes):
+                self.batch.non_tensor_batch["episode_success"] = np.array(successes)
+                metrics = compute_data_metrics(self.batch, use_critic=False)
+                self.assertEqual(metrics["episode/successful_length/mean"], expected[0])
+                self.assertEqual(metrics["episode/successful_length/max"], expected[1])
+
+    def test_all_failed_group_fraction(self):
+        for successes, expected in [([False, False], 1.0),
+                                    ([False, True], 0.0),
+                                    ([True, True], 0.0)]:
+            with self.subTest(successes=successes):
+                self.batch.non_tensor_batch["episode_success"] = np.array(successes)
+                metrics = compute_data_metrics(self.batch, use_critic=False)
+                self.assertEqual(metrics["episode/all_failed_group_fraction"], expected)
+
+    def test_all_failed_fraction_weights_groups_equally(self):
+        # Unequal group sizes, repeated turns, padding copies, and shuffled rows.
+        rows = [0, 1, 0, 1, 0, 1, 0, 1, 0]
+        self.batch.batch = {key: value[rows] for key, value in self.batch.batch.items()}
+        self.batch.non_tensor_batch = {
+            "uid": np.array(["failed", "mixed", "passed", "failed", "mixed",
+                             "failed", "mixed", "passed", "mixed"]),
+            "traj_uid": np.array(["a", "c", "e", "b", "d", "a", "c", "e", "c"]),
+            # Positive rewards on failed trajectories must not imply success.
+            "episode_rewards": np.ones(9),
+            "episode_lengths": np.array([2, 3, 1, 1, 1, 2, 3, 1, 3]),
+            "episode_success": np.array([False, False, True, False, True,
+                                         False, False, True, False]),
+            "tool_callings": np.zeros(9),
+        }
+        metrics = compute_data_metrics(self.batch, use_critic=False)
+        self.assertAlmostEqual(metrics["episode/all_failed_group_fraction"], 1 / 3)
+
+    def test_all_failed_fraction_requires_group_ids_and_success_flags(self):
+        for missing_key in ("uid", "episode_success"):
+            with self.subTest(missing_key=missing_key):
+                saved = self.batch.non_tensor_batch.pop(missing_key)
+                metrics = compute_data_metrics(self.batch, use_critic=False)
+                self.assertNotIn("episode/all_failed_group_fraction", metrics)
+                self.batch.non_tensor_batch[missing_key] = saved
+
+    def test_successful_lengths_count_each_trajectory_once(self):
+        # Repeated turns and padding copies must not bias trajectory statistics.
+        self.batch.batch = {key: value[[0, 1, 1, 0, 0, 0, 1]]
+                            for key, value in self.batch.batch.items()}
+        self.batch.non_tensor_batch = {
+            "traj_uid": np.array(["a", "b", "b", "c", "a", "c", "b"]),
+            "episode_rewards": np.zeros(7),
+            "episode_lengths": np.array([2, 4, 4, 9, 2, 9, 4]),
+            "episode_success": np.array([True, True, True, False, True, False, True]),
+            "tool_callings": np.zeros(7),
+        }
+        metrics = compute_data_metrics(self.batch, use_critic=False)
+        self.assertEqual(metrics["episode/successful_length/mean"], 3)
+        self.assertEqual(metrics["episode/successful_length/max"], 4)
     
     def test_compute_data_metrics_with_critic(self):
         """Test compute_data_metrics with critic enabled."""

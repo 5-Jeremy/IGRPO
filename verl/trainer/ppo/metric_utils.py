@@ -215,6 +215,26 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         ),
         **({f"episode/{k}": v[0].item() for k, v in batch.non_tensor_batch.items() if "success_rate" in k}),
     }
+    metadata = batch.non_tensor_batch
+    if "episode_success" in metadata:
+        if tree_structure:
+            # Each terminal node represents one path, including pruned paths.
+            leaves = np.flatnonzero(metadata["is_terminal"])
+            _, first = np.unique(metadata["node_uid"][leaves], return_index=True)
+            outcomes = leaves[first]
+            lengths = metadata["traj_step"][outcomes] + 1
+        else:
+            outcomes = unique_idx
+            lengths = metadata["episode_lengths"][outcomes]
+        success = metadata["episode_success"][outcomes].astype(bool)
+        successful_lengths = lengths[success]
+        metrics["episode/successful_length/mean"] = float(successful_lengths.mean()) if successful_lengths.size else 0.0
+        metrics["episode/successful_length/max"] = float(successful_lengths.max()) if successful_lengths.size else 0.0
+        if "uid" in metadata and len(outcomes):
+            groups, indices = np.unique(metadata["uid"][outcomes], return_inverse=True)
+            group_success = np.zeros(len(groups), dtype=bool)
+            np.logical_or.at(group_success, indices, success)
+            metrics["episode/all_failed_group_fraction"] = float(np.mean(~group_success))
     return metrics
 
 

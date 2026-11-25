@@ -237,6 +237,9 @@ algorithm:
   lam: 1.0
   adv_estimator: gae
   norm_adv_by_std_in_grpo: True
+  reasoning_advantage:
+    enabled: False # Shape reasoning tokens after the configured advantage estimator.
+  unfinished_thinking_penalty: 0.0 # Add a negative reward (e.g. -0.1) when a turn reaches the token limit without </think>.
   use_kl_in_reward: False
   kl_penalty: kl # how to estimate kl divergence
   kl_ctrl:
@@ -280,6 +283,23 @@ trainer:
   log_val_generations: 0
   rollout_data_dir: null # directory for logging the rollout data, no dump if null
   validation_data_dir: null # directory for logging the validation data, no dump if null
+  track_reasoning_entropy: false # Save reasoning-step and answer token entropy in training rollout JSONL.
+  decision_model:
+    enabled: false # Probe before rollout. Any failed request checkpoints the last update and halts training.
+    selective_requests: false # Cap eligible turns per trajectory. Every selected turn includes step 1.
+    max_turns_per_trajectory: 10 # Selective mode only; nonnegative integer. 0 submits no turn requests.
+    model: kev-latest
+    # Applies to all environments even when the decision model is disabled.
+    # null: Qwen uses ["however,", "wait,", "but wait,", "alternatively,"].
+    # Other models split at newlines after '.' or '?'. A list overrides either default; [] disables splitting.
+    thinking_split_phrases: null
+    template_path: null # Default: agent_system/decision_model_inputs/questions.json
+    url: http://127.0.0.1:8009/v1/models
+    timeout: 50.0 # GET health-check timeout in seconds
+    request_url: null # Default: systemone beside the health-check URL (/v1/systemone).
+    request_timeout: 300.0 # Timeout in seconds for each action-trace POST.
+    max_concurrent_requests: 32 # 1-128 concurrent POSTs on one background event-loop thread.
+    api_key_env: PROMPT_TESTBED_API_KEY # Optional bearer token read from the driver environment.
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1

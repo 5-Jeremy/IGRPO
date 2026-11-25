@@ -1,0 +1,10 @@
+{
+  "background_info_file": "background.txt",
+  "state_template": "{background_info}\n\nThe full set of reasoning steps and the action chosen are as follows:\n\n{reasoning_steps}",
+  "instructions_template": "Consider reasoning step [{step_number}]: {step_text}.\n\nDoes this reasoning step support the chosen action in <action>, contradict the chosen action, or make no claim on what the correct action is?",
+  "criteria": [
+    "The reasoning step supports the chosen action",
+    "The reasoning step contradicts the chosen action",
+    "The reasoning step makes no claim on what the correct action is"
+  ]
+}

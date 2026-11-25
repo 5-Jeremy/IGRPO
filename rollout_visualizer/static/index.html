@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Training Rollout Trees</title><link rel="stylesheet" href="/style.css"></head>
+<body><div class="app-shell">
+<header class="toolbar panel"><div class="title"><h1>Training Rollout Trees</h1><div id="directory" class="muted"></div></div><label>Training step<select id="step"></select></label><label>Rollout group<select id="group"></select></label><button id="refresh">Refresh files</button><button id="fit">Fit graph</button></header>
+<div id="error" role="alert"></div><div id="notice" class="notice"></div>
+<main><section class="panel graph-panel"><div class="graph-toolbar"><div id="structure-legend" class="legend"><span><i class="root"></i>Context</span><span><i class="branch"></i>Action</span><span><i class="leaf"></i>Leaf</span></div><div id="score-legend" class="legend" hidden><span><i class="root"></i>Context</span><span><i class="score-low"></i>Score 0</span><span><i class="score-high"></i>Score 1</span><span><i class="missing"></i>No score</span></div><div id="reward-legend" class="legend" hidden><span><i class="root"></i>Context</span><span><i class="score-low"></i><span id="reward-low-label">Lower reward</span></span><span><i class="score-high"></i><span id="reward-high-label">Higher reward</span></span><span><i class="missing"></i>No reward</span></div><div id="entropy-legend" class="legend" hidden><span><i class="root"></i>Context</span><span><i class="score-low"></i><span id="entropy-low-label">Lower entropy</span></span><span><i class="score-high"></i><span id="entropy-high-label">Higher entropy</span></span><span><i class="missing"></i>No entropy</span></div><div id="reasoning-legend" class="legend" hidden><span><i class="advantage-negative"></i><span id="advantage-negative-label">Negative</span></span><span><i class="advantage-zero"></i>Zero</span><span><i class="advantage-positive"></i><span id="advantage-positive-label">Positive</span></span><span><i class="missing"></i>No advantage</span></div><div class="graph-controls"><span id="stats" class="muted"></span><label>Color nodes<select id="color-mode"><option value="structure">Structure</option><option value="score">Score</option><option value="reward">Turn reward</option><option value="answer-entropy">Answer token entropy</option><option value="igpo-turn">IGPO turn advantage</option><option value="gigpo-turn">GiGPO turn advantage</option><option value="reasoning">Mean reasoning advantage</option></select></label></div></div><div class="canvas"><svg id="graph" aria-label="Rollout tree" role="group"><g id="scene"></g></svg><div id="empty" class="empty"></div></div><footer>Drag to pan · Scroll to zoom · Select a node to inspect its saved records <span><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button></span></footer></section>
+<aside class="panel"><h2>Node details</h2><div id="detail-order-hint" class="muted">Double-click a detail to move it to the top. Order is saved in this browser.</div><label id="record-label">Saved record<select id="record"></select></label><div id="details" class="scroll"></div></aside></main>
+<section class="panel text-panel">
+<div class="result-tabs" role="tablist" aria-label="Saved node information">
+<button id="saved-tab" role="tab" aria-selected="true" aria-controls="saved-panel">Saved text &amp; context</button>
+<button id="decision-tab" role="tab" aria-selected="false" aria-controls="decision-panel" tabindex="-1">Decision model results</button>
+</div>
+<div id="saved-panel" class="tab-panel" role="tabpanel" aria-labelledby="saved-tab">
+<div class="text-toolbar"><label>Text field<select id="field"><option value="input">Input prompt</option><option value="output">Model output</option><option value="reasoning_steps">Reasoning steps</option><option value="context">Initial context</option><option value="problem">Search question</option><option value="actions">Generated actions through this node</option><option value="raw">Full saved record</option></select></label></div>
+<pre id="text" tabindex="0">Select a node to inspect its text.</pre>
+</div>
+<div id="decision-panel" class="tab-panel" role="tabpanel" aria-labelledby="decision-tab" hidden>
+<div class="decision-controls">
+<label>Highlight steps<select id="decision-highlight"><option value="off">Off</option><option value="any">Any option</option><option value="0">Supports</option><option value="1">Contradicts</option><option value="2">No claim</option></select></label>
+<label>Probability above (%)<input id="decision-threshold" type="number" min="0" max="100" step="any" value="80" disabled></label>
+<span id="decision-highlight-count" class="muted" role="status"></span>
+</div>
+<div id="decision-content" tabindex="0">
+<h2 id="decision-action-label">Chosen action</h2><pre id="decision-action" aria-labelledby="decision-action-label">No saved action.</pre>
+<p id="decision-answer-entropy" class="decision-entropy">Answer entropy: —</p>
+<p class="muted">Probability order: supports, contradicts, no claim. Missing probabilities appear as —.</p>
+<p id="decision-status" class="muted" role="status">Select a node to inspect its decision model results.</p>
+
+<table id="decision-results"><thead><tr><th scope="col">Step &amp; metrics</th><th scope="col">Reasoning text</th></tr></thead><tbody id="decision-rows"></tbody></table>
+</div>
+</div>
+</section>
+</div><script src="/decision_model.js"></script><script src="/app.js"></script></body></html>

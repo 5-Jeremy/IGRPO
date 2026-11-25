@@ -1,6 +1,10 @@
 set -x
 
-ENGINE=${1:-vllm}
+ENGINE=vllm
+if [[ $# -gt 0 && $1 != *=* && $1 != -* ]]; then
+    ENGINE=$1
+    shift
+fi
 
 train_data_size=256
 val_data_size=512
@@ -70,4 +74,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=50 \
     trainer.test_freq=50 \
     trainer.total_epochs=1 \
-    trainer.val_before_train=False $@
+    trainer.val_before_train=False "$@"

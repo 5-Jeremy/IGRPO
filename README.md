@@ -83,3 +83,25 @@ After the retriever server is ready, activate the IGRPO training environment and
 conda activate igrpo
 bash examples/igrpo_trainer/run_search.sh
 ```
+
+## Decision-model shaping for Search
+
+The Search trainers can submit each valid generated reasoning trace to a decision model during rollout. Enable the client and the policy adjustment and select a directory for per-turn logs. This example uses the default decision endpoint at `http://127.0.0.1:8009/v1/models` and posts to the adjacent `/v1/systemone` endpoint.
+
+```bash
+bash examples/igpo_trainer/run_search.sh \
+    trainer.decision_model.enabled=true \
+    algorithm.reasoning_advantage.enabled=true \
+    trainer.track_reasoning_entropy=true \
+    trainer.rollout_data_dir=logs/search/rollouts
+```
+
+Set `trainer.decision_model.url` and, if needed, `request_url` under the same config section for a different server. The driver reads the optional bearer token from the environment variable named by `api_key_env`. When enabled, a failed health check, timeout, unsuccessful POST, or invalid answer halts training before the update, including failures on turns discarded by sampling. The trainer saves an emergency checkpoint with the dataloader positioned to retry the interrupted batch. Resume with `trainer.resume_mode=resume_path` and `trainer.resume_from_path` set to the printed checkpoint directory.
+
+Shaping multiplies the trainable reasoning tokens’ **existing actor advantages** from the first reasoning step of each judged turn, including single-step turns. For IGPO, each turn starts from its normalized, discounted information-gain or terminal reward. The rule uses the decision model’s support, contradiction, and no-claim probabilities. A supporting first step receives the 1.3× multiplier because it has no preceding step. Later supporting steps receive that multiplier when the preceding step’s support was below 50%. Action and padding tokens keep their original advantages. Critic targets keep the estimator’s original returns. Missing reasoning or unverified token alignment is recorded and skipped.
+
+The default Qwen splitter starts a new step at “however,”, “wait,”, “but wait,”, or “alternatively,”. Other models split on newlines following a period or question mark. Override this with `trainer.decision_model.thinking_split_phrases`. With `selective_requests=true`, the decision model judges every reasoning step in the first `max_turns_per_trajectory` eligible turns of each trajectory. IGRPO branches inherit the request count on their shared prefix.
+
+Both IGPO Search launchers subtract 0.1 from the training reward of each turn that reaches the generation token limit without emitting `</think>`. Pass `algorithm.unfinished_thinking_penalty=0.0` to disable the penalty. The setting works independently of the decision model.
+
+Run `python -m rollout_visualizer logs/search/rollouts` to inspect the saved Search trees, per-step probabilities, advantages, and entropy. [Viewer guide](rollout_visualizer/README.md)

@@ -1,6 +1,10 @@
 set -x
 
-ENGINE=${1:-vllm}
+ENGINE=vllm
+if [[ $# -gt 0 && $1 != *=* && $1 != -* ]]; then
+    ENGINE=$1
+    shift
+fi
 
 train_data_size=256
 val_data_size=512
@@ -85,4 +89,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=False \
     hydra.run.dir='./output/${now:%Y-%m-%d}/${now:%H-%M-%S}' \
     hydra.output_subdir=null \
-    $@
+    "$@"

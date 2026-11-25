@@ -22,12 +22,13 @@ import json
 import os
 import uuid
 from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
 from typing import Dict, Optional, Type
+from urllib.parse import urljoin
 
 import numpy as np
 import ray
@@ -56,6 +57,7 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.metric import (
     reduce_metrics,
 )
+from verl.utils.rollout_logging import ROLLOUT_METADATA_FIELDS, ROLLOUT_OPTIONAL_FIELDS, dump_generations
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -63,6 +65,11 @@ from verl.workers.rollout.async_server import AsyncLLMServerManager
 from gigpo import core_gigpo
 from igpo import core_igpo
 from verl.utils.advantage_estimator import AdvantageEstimator
+from agent_system.decision_model import DecisionModelRequestBatch, DecisionModelUnavailable, check_decision_model
+from agent_system.decision_model_requests import DecisionModelRequestBuilder, attach_decision_model_probabilities, decision_turn_ids
+from agent_system.reasoning_advantage import attach_reasoning_token_ids, adjust_reasoning_advantages
+from agent_system.reasoning_entropy import attach_reasoning_entropy
+from agent_system.reasoning_steps import attach_reasoning_steps, resolve_thinking_split_phrases
 from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 
 WorkerType = Type[Worker]
@@ -226,6 +233,38 @@ def compute_response_mask(data: DataProto):
     attention_mask = data.batch["attention_mask"]
     return attention_mask[:, -response_length:]
 
+
+def apply_unfinished_thinking_penalty(data: DataProto, tokenizer, response_token_limit: int, penalty: float) -> int:
+    """Add a penalty at the last generated token of each length-capped turn missing </think>."""
+    responses = data.batch["responses"]
+    truncated_lengths = data.batch.get("truncated_response_length")
+    if truncated_lengths is None:
+        # Rollout backends without finish metadata use the attended response length.
+        lengths = compute_response_mask(data).sum(dim=-1, dtype=torch.long)
+        hit_limit = lengths == response_token_limit
+        terminal_ids = [token_id for token_id in (tokenizer.eos_token_id, tokenizer.pad_token_id) if token_id is not None]
+        if terminal_ids:
+            last_tokens = responses.gather(1, (lengths - 1).clamp_min(0).unsqueeze(1)).squeeze(1)
+            hit_limit &= ~torch.isin(last_tokens, responses.new_tensor(terminal_ids))
+        truncated_lengths = lengths.masked_fill(~hit_limit, 0)
+
+    capped_rows = truncated_lengths.nonzero(as_tuple=True)[0].tolist()
+    if not capped_rows:
+        return 0
+    lengths = truncated_lengths[capped_rows].tolist()
+    response_ids = responses[capped_rows].tolist()
+    outputs = tokenizer.batch_decode(
+        [ids[:length] for ids, length in zip(response_ids, lengths, strict=True)],
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )
+    penalized_rows = [row for row, output in zip(capped_rows, outputs, strict=True) if "</think>" not in output.lower()]
+    data.batch["token_level_scores"][penalized_rows, truncated_lengths[penalized_rows] - 1] += penalty
+    if "step_rewards" in data.batch:
+        data.batch["step_rewards"][penalized_rows] += penalty
+    return len(penalized_rows)
+
+
 def debug_batch(batch: DataProto, info: str, global_steps: int, batch_debug_freq: int, batch_debug_think: bool, batch_debug_experiment_name: str, debug_dir: str):
     if batch_debug_freq <= 0 or global_steps % batch_debug_freq != 0:
         return
@@ -245,6 +284,14 @@ def debug_batch(batch: DataProto, info: str, global_steps: int, batch_debug_freq
         pickle.dump(batch, f)
 
     print(f"[DEBUG] Batch saved to: {path}")
+
+def turn_advantage_means(values, response_mask):
+    """Log each turn's pre-shaping advantage, omitting fully masked responses."""
+    counts = response_mask.sum(-1)
+    means = (values.float().sum(-1) / counts.clamp_min(1)).detach().cpu().tolist()
+    return np.array([mean if present else None for mean, present in zip(means, counts.bool().tolist(), strict=True)],
+                    dtype=object)
+
 
 def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, step_advantage_w=1.0, gigpo_mode="mean_std_norm", gigpo_enable_similarity=False, gigpo_similarity_thresh=0.95, **kwargs):
     """Compute advantage estimates for policy optimization.
@@ -286,6 +333,9 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 kwargs.get("pf_ppo_weight_pow", 2.0),
             )
     elif adv_estimator == AdvantageEstimator.IGPO:
+        # IGPO normalizes and discounts its input in place. Preserve the turn
+        # reward that actually entered the estimator (including action penalties).
+        data.non_tensor_batch["igpo_step_reward"] = data.batch["step_rewards"].detach().float().cpu().numpy().copy()
         advantages, returns = core_igpo.compute_igpo_outcome_advantage(
             step_rewards=data.batch['step_rewards'],
             response_mask=data.batch['response_mask'],
@@ -297,6 +347,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+        data.non_tensor_batch["igpo_turn_advantage"] = turn_advantage_means(advantages, data.batch["response_mask"])
     elif adv_estimator == AdvantageEstimator.IGRPO:
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
@@ -371,7 +422,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
     elif adv_estimator == AdvantageEstimator.GiGPO:
-        advantages, returns = core_gigpo.compute_gigpo_outcome_advantage(
+        advantages, returns, components = core_gigpo.compute_gigpo_outcome_advantage(
             token_level_rewards=data.batch['token_level_rewards'], # for episode group reward computing
             step_rewards=data.batch['step_rewards'], # for step group reward computing
             response_mask=data.batch['response_mask'],
@@ -382,9 +433,17 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             mode=gigpo_mode,
             enable_similarity=gigpo_enable_similarity,
             similarity_thresh=gigpo_similarity_thresh,
+            return_components=True,
             )
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
+        # Save one scalar per actual turn; padding/reordering retain row identity.
+        # These describe GiGPO before reasoning hooks, not final token advantages.
+        for name, values in components.items():
+            data.non_tensor_batch[f"gigpo_{name}_advantage"] = turn_advantage_means(values, data.batch["response_mask"])
+        data.non_tensor_batch["gigpo_weighted_turn_advantage"] = np.array(
+            [None if value is None else step_advantage_w * value
+             for value in data.non_tensor_batch["gigpo_turn_advantage"]], dtype=object)
     else:
         raise NotImplementedError
     # dump batch to debug
@@ -678,28 +737,13 @@ class RayPPOTrainer:
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
-    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path):
-        """Dump rollout/validation samples as JSONL."""
+    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path, rollout_metadata=None,
+                          *, validation=False):
+        """Dump rollout/validation samples as JSONL with stable trajectory metadata."""
         os.makedirs(dump_path, exist_ok=True)
-        filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
-
-        n = len(inputs)
-        base_data = {
-            "input": inputs,
-            "output": outputs,
-            "score": scores,
-            "step": [self.global_steps] * n,
-        }
-
-        for k, v in reward_extra_infos_dict.items():
-            if len(v) == n:
-                base_data[k] = v
-
-        with open(filename, "w") as f:
-            for i in range(n):
-                entry = {k: v[i] for k, v in base_data.items()}
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
+        suffix = ".validation.jsonl" if validation else ".jsonl"
+        filename = os.path.join(dump_path, f"{self.global_steps}{suffix}")
+        dump_generations(filename, inputs, outputs, scores, reward_extra_infos_dict, rollout_metadata, step=self.global_steps)
         print(f"Dumped generations to {filename}")
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
@@ -726,6 +770,14 @@ class RayPPOTrainer:
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
+    def _get_thinking_split_phrases(self):
+        model_path = self.config.actor_rollout_ref.get("model", {}).get("path", "")
+        # The tokenizer class also identifies Qwen when a local checkpoint's
+        # directory name no longer contains the original model name.
+        model_name = f"{model_path} {type(self.tokenizer).__name__}"
+        return resolve_thinking_split_phrases(
+            model_name, self.config.trainer.get("decision_model", {}).get("thinking_split_phrases"))
+
     def _validate(self):
         from collections import Counter
 
@@ -740,6 +792,8 @@ class RayPPOTrainer:
         sample_inputs = []
         sample_outputs = []
         sample_scores = []
+        validation_dir = self.config.trainer.get("validation_data_dir")
+        validation_metadata = defaultdict(list)
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -750,12 +804,6 @@ class RayPPOTrainer:
             # we only do validation on rule-based rm
             if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
                 return {}
-
-            # Store original inputs
-            input_ids = test_batch.batch["input_ids"]
-            # TODO: Can we keep special tokens except for padding tokens?
-            input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
-            sample_inputs.extend(input_texts)
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
             non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "data_source", "ground_truth"]
@@ -798,10 +846,17 @@ class RayPPOTrainer:
             print('validation generation end')
             del test_batch
             test_batch = test_output_gen_batch
+            sample_inputs.extend(self.tokenizer.batch_decode(test_batch.batch["prompts"], skip_special_tokens=True,
+                                                              clean_up_tokenization_spaces=False))
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
-            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
+            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True, clean_up_tokenization_spaces=False) for ids in output_ids]
             sample_outputs.extend(output_texts)
+            if validation_dir:
+                attach_reasoning_steps(test_batch, self.tokenizer, self._get_thinking_split_phrases(), outputs=output_texts)
+                for key in (*ROLLOUT_METADATA_FIELDS, *ROLLOUT_OPTIONAL_FIELDS, "rewards", "uid"):
+                    if key in test_batch.non_tensor_batch:
+                        validation_metadata[key].extend(test_batch.non_tensor_batch[key].tolist())
 
             # test_batch = test_batch.union(test_output_gen_batch)
 
@@ -841,6 +896,9 @@ class RayPPOTrainer:
                     for i in range(1, len(test_batch.non_tensor_batch[k])):
                         assert test_batch.non_tensor_batch[k][0] == test_batch.non_tensor_batch[k][i], f'not all success_rate are the same, 0: {test_batch.non_tensor_batch[k][0]}, {i}: {test_batch.non_tensor_batch[k][i]}'
 
+        if validation_dir:
+            self._dump_generations(sample_inputs, sample_outputs, sample_scores, {}, validation_dir, validation_metadata,
+                                   validation=True)
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
@@ -999,7 +1057,79 @@ class RayPPOTrainer:
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
 
+    def _save_decision_model_emergency_checkpoint(self, dataloader_state, epoch, failure):
+        """Save pre-update weights and rewind data to retry the interrupted batch."""
+        completed_step = self.global_steps - 1
+        folder = os.path.abspath(os.path.join(
+            self.config.trainer.default_local_dir, f"emergency_{uuid.uuid4().hex}",
+            f"global_step_{completed_step}",
+        ))
+        print(f"Decision model failure; saving emergency checkpoint to {folder}", flush=True)
+        os.makedirs(folder, exist_ok=False)
+        # Isolated directory and no retention pruning: preserve regular checkpoints.
+        self.actor_rollout_wg.save_checkpoint(
+            os.path.join(folder, "actor"), None, completed_step, max_ckpt_to_keep=None)
+        if self.use_critic:
+            self.critic_wg.save_checkpoint(
+                os.path.join(folder, "critic"), None, completed_step, max_ckpt_to_keep=None)
+        torch.save(dataloader_state, os.path.join(folder, "data.pt"))
+        # Write the marker last, only after all checkpoint components have saved.
+        state = {"epoch": epoch, "failed_step": self.global_steps, "reason": str(failure), "metrics": failure.metrics}
+        if getattr(self, "_resume_expand_num", False):
+            # The running IGRPO expansion schedule has already changed its config.
+            state["max_traj_to_expand_per_node"] = self.config.algorithm.igrpo.max_traj_to_expand_per_node
+        with open(os.path.join(folder, "emergency.json"), "w") as stream:
+            json.dump(state, stream, indent=2)
+        print(f"Emergency checkpoint saved. Resume with trainer.resume_mode=resume_path "
+              f"trainer.resume_from_path={folder}", flush=True)
+        return folder
+
+    def _decision_model_api_key(self):
+        name = self.config.trainer.decision_model.get("api_key_env", "PROMPT_TESTBED_API_KEY")
+        return os.environ.get(name) if name else None
+
+    def _new_decision_model_batch(self):
+        settings = self.config.trainer.decision_model
+        return DecisionModelRequestBatch(
+            url=settings.get("request_url") or urljoin(settings.url, "systemone"),
+            timeout=settings.get("request_timeout", 300.0), api_key=self._decision_model_api_key(),
+            max_concurrent_requests=settings.get("max_concurrent_requests", 32),
+        )
+
+    def _check_decision_model(self, metrics, logger, dataloader_state, epoch, pending=None, retained_ids=None):
+        settings = self.config.trainer.decision_model
+        try:
+            if pending is not None:
+                response_metrics, probabilities = pending.finish(retained_ids=retained_ids)
+                metrics.update(response_metrics)
+                return probabilities
+            health = check_decision_model(settings.url, settings.timeout, api_key=self._decision_model_api_key(),
+                                          model=settings.get("model", "kev-latest"))
+            model_name = health.pop("decision_model/model_name")
+            metrics.update(health)
+            if getattr(self, "_decision_model_run", None) != model_name:
+                if "wandb" in logger.logger:
+                    config = OmegaConf.to_container(self.config.trainer, resolve=True)
+                    config["decision_model"]["model_name"] = model_name
+                    logger.logger["wandb"].config.update({"trainer": config}, allow_val_change=True)
+                self._decision_model_run = model_name
+        except DecisionModelUnavailable as exc:
+            metrics.update(exc.metrics)
+            metrics["decision_model/emergency_checkpoint_saved"] = 0
+            try:
+                folder = self._save_decision_model_emergency_checkpoint(dataloader_state, epoch, exc)
+                metrics["decision_model/emergency_checkpoint_saved"] = 1
+            except Exception as save_error:
+                raise RuntimeError(f"{exc}. Emergency checkpoint saving also failed: {save_error}") from save_error
+            # A logging outage must not prevent checkpoint saving or hide the API failure.
+            try:
+                logger.log(data=metrics, step=self.global_steps)
+            except Exception as log_error:
+                print(f"Could not log decision-model failure metrics: {log_error}", flush=True)
+            raise RuntimeError(f"{exc}. Training halted before the update. Emergency checkpoint: {folder}") from exc
+
     def _load_checkpoint(self):
+        self._resume_epoch = 0
         if self.config.trainer.resume_mode == "disable":
             return 0
 
@@ -1050,6 +1180,16 @@ class RayPPOTrainer:
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
+        emergency_path = os.path.join(global_step_folder, "emergency.json")
+        if os.path.exists(emergency_path):
+            with open(emergency_path) as stream:
+                emergency = json.load(stream)
+            self._resume_epoch = emergency["epoch"]
+            if "max_traj_to_expand_per_node" in emergency:
+                self.config.algorithm.igrpo.max_traj_to_expand_per_node = emergency["max_traj_to_expand_per_node"]
+                self._resume_expand_num = True
+            print(f"Retrying interrupted step {emergency['failed_step']} in epoch {self._resume_epoch}")
+
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
         attention_mask = batch.batch["attention_mask"]
@@ -1097,6 +1237,21 @@ class RayPPOTrainer:
 
         from verl.utils.tracking import Tracking
 
+        decision_model = self.config.trainer.get("decision_model", {})
+        decision_enabled = decision_model.get("enabled", False)
+        if decision_enabled:
+            checkpoint_configs = [self.config.actor_rollout_ref.actor.checkpoint]
+            if self.use_critic:
+                checkpoint_configs.append(self.config.critic.checkpoint)
+            if any(not {"model", "optimizer", "extra"}.issubset(cfg.contents) for cfg in checkpoint_configs):
+                raise ValueError("Enabled decision model requires checkpoint.contents=[model,optimizer,extra] "
+                                 "for resumable emergency checkpoints")
+
+        thinking_split_phrases = self._get_thinking_split_phrases()
+        unfinished_thinking_penalty = float(self.config.algorithm.get("unfinished_thinking_penalty", 0.0))
+        if not -float("inf") < unfinished_thinking_penalty <= 0.0:
+            raise ValueError("algorithm.unfinished_thinking_penalty must be a finite non-positive reward")
+
         logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -1126,8 +1281,15 @@ class RayPPOTrainer:
         self.global_steps += 1
         last_val_metrics = None
 
-        for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+        for epoch in range(self._resume_epoch, self.config.trainer.total_epochs):
+            train_iterator = iter(self.train_dataloader)
+            while True:
+                # Capture before fetching: the failed batch must be retried after resume.
+                emergency_dataloader_state = deepcopy(self.train_dataloader.state_dict()) if decision_enabled else None
+                try:
+                    batch_dict = next(train_iterator)
+                except StopIteration:
+                    break
                 metrics = {}
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
@@ -1152,7 +1314,22 @@ class RayPPOTrainer:
 
                 is_last_step = self.global_steps >= self.total_training_steps
 
-                with _timer("step", timing_raw):
+                pending_decisions = None
+                on_turn_generated = None
+                if decision_enabled:
+                    self._check_decision_model(metrics, logger, emergency_dataloader_state, epoch)
+                    request_builder = DecisionModelRequestBuilder(
+                        template_path=decision_model.get("template_path"), model=decision_model.get("model", "kev-latest"),
+                        selective_requests=decision_model.get("selective_requests", False),
+                        max_turns_per_trajectory=decision_model.get("max_turns_per_trajectory", 10))
+                    pending_decisions = self._new_decision_model_batch()
+
+                    def on_turn_generated(turn_batch, outputs, active_masks):
+                        request_builder.submit_turns(
+                            turn_batch, outputs, active_masks, self.tokenizer, pending_decisions,
+                            thinking_split_phrases)
+
+                with _timer("step", timing_raw), (pending_decisions if pending_decisions is not None else nullcontext()):
                     # generate a batch
                     with _timer("gen", timing_raw):
                         ################ agent-environment loop ###############
@@ -1161,6 +1338,7 @@ class RayPPOTrainer:
                                                                 actor_rollout_wg=self.actor_rollout_wg,
                                                                 envs=self.envs,
                                                                 is_train=True,
+                                                                on_turn_generated=on_turn_generated,
                                                                 )
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer("gen_max", timing_raw):
@@ -1181,6 +1359,18 @@ class RayPPOTrainer:
                     del batch
                     batch = gen_batch_output
                     self.debug_batch_instance(batch, "after_multi_turn_loop")
+                    if "reasoning_trace" not in batch.non_tensor_batch:
+                        attach_reasoning_steps(batch, self.tokenizer, thinking_split_phrases)
+                    if self.config.algorithm.get("reasoning_advantage", {}).get("enabled", False):
+                        attach_reasoning_token_ids(batch, self.tokenizer, thinking_split_phrases)
+                    # Full-path IGRPO may repeat a generated prefix in multiple training rows.
+                    _, nodes = np.unique(decision_turn_ids(batch), return_index=True)
+                    traces = batch.non_tensor_batch["reasoning_trace"][nodes]
+                    metrics["response_length/reasoning_step_count"] = float(np.mean([
+                        len(trace["steps"]) if trace else 0 for trace in traces
+                    ]))
+                    if pending_decisions is not None:
+                        self.decision_model_requests = pending_decisions.requests
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.GiGPO:
                         step_rewards_tensor = core_gigpo.compute_step_discounted_returns(
@@ -1219,6 +1409,8 @@ class RayPPOTrainer:
                     with _timer("old_log_prob", timing_raw):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
+                        if self.config.trainer.get("track_reasoning_entropy", False):
+                            attach_reasoning_entropy(batch, self.tokenizer, entropys, thinking_split_phrases)
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
                         entropy_loss = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
@@ -1269,6 +1461,12 @@ class RayPPOTrainer:
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
 
+                    if pending_decisions is not None:
+                        probabilities = self._check_decision_model(
+                            metrics, logger, emergency_dataloader_state, epoch, pending=pending_decisions,
+                            retained_ids=decision_turn_ids(batch))
+                        attach_decision_model_probabilities(batch, probabilities)
+
                     with _timer("adv", timing_raw):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
@@ -1303,6 +1501,14 @@ class RayPPOTrainer:
                                                                                   )
                             metrics.update(invalid_metrics)
 
+                        if unfinished_thinking_penalty:
+                            # IGPO has already read the unpenalized terminal score into step_rewards.
+                            rollout_config = self.config.actor_rollout_ref.rollout
+                            response_token_limit = rollout_config.get("max_tokens", rollout_config.get("max_new_tokens", rollout_config.response_length))
+                            metrics["reward/unfinished_thinking_penalized_rows"] = apply_unfinished_thinking_penalty(
+                                batch, self.tokenizer, response_token_limit, unfinished_thinking_penalty,
+                            )
+
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
                             batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty)
@@ -1335,6 +1541,9 @@ class RayPPOTrainer:
                             batch_debug_experiment_name=self.config.trainer.experiment_name,
                             debug_dir=self.config.trainer.debug_dir
                         )
+                        if "reasoning_step_ids" in batch.batch:
+                            with _timer("reasoning_advantage", timing_raw):
+                                metrics.update(adjust_reasoning_advantages(batch))
                         self.debug_batch_instance(batch, "after_adv")
                     # update critic
                     if self.use_critic:
@@ -1358,8 +1567,8 @@ class RayPPOTrainer:
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
                         with _timer("dump_rollout_generations", timing_raw):
-                            inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
-                            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+                            inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True, clean_up_tokenization_spaces=False)
+                            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True, clean_up_tokenization_spaces=False)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
                             self._dump_generations(
                                 inputs=inputs,
@@ -1367,6 +1576,7 @@ class RayPPOTrainer:
                                 scores=scores,
                                 reward_extra_infos_dict=reward_extra_infos_dict,
                                 dump_path=rollout_data_dir,
+                                rollout_metadata=batch.non_tensor_batch,
                             )
 
                     if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):

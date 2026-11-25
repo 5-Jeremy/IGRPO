@@ -146,9 +146,13 @@ def compute_gigpo_outcome_advantage(token_level_rewards: torch.Tensor,
                                    mode: str = "mean_norm",
                                    enable_similarity: bool = False,
                                    similarity_thresh: float = 0.95,
+                                   return_components: bool = False,
                                    ):
     """
     Compute the advantages for GiGPO (https://arxiv.org/abs/2505.10978).
+
+    Optionally return the unweighted episode and turn components for logging,
+    before downstream policy hooks modify the combined token advantages.
     """
     if mode == "mean_std_norm":
         remove_std = False
@@ -168,6 +172,8 @@ def compute_gigpo_outcome_advantage(token_level_rewards: torch.Tensor,
 
     # Compute joint advantages (Eq. 8 in the paper).
     scores = episode_advantages + step_advantage_w * step_advantages
+    if return_components:
+        return scores, scores, {"episode": episode_advantages, "turn": step_advantages}
     return scores, scores
 
 

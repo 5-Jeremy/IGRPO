@@ -31,6 +31,7 @@ from typing import List, Dict
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from igrpo.core_igrpo import TrajectoryNodeStateManagement
 from verl.utils.advantage_estimator import AdvantageEstimator
+from verl.utils.rollout_logging import add_trajectory_metadata, add_tree_metadata
 
 class TrajectoryCollector:
     def __init__(self, config, tokenizer: PreTrainedTokenizer, processor=None):
@@ -267,6 +268,7 @@ class TrajectoryCollector:
         
         effective_batch = []
         for bs in range(batch_size):
+            add_trajectory_metadata(total_batch_list[bs], traj_uid[bs])
             # sum the rewards for each data in total_batch_list[bs]
             for data in total_batch_list[bs]:
                 assert traj_uid[bs] == data['traj_uid'], "data is not from the same trajectory"
@@ -275,6 +277,8 @@ class TrajectoryCollector:
                     data['episode_rewards'] = episode_rewards[bs]
                     # episode_lengths
                     data['episode_lengths'] = episode_lengths[bs]
+                    if 'success_rate' in success:
+                        data['episode_success'] = bool(success['success_rate'][bs])
                     # tool_callings
                     data['tool_callings'] = tool_callings[bs]
                     # success_rate
@@ -304,7 +308,12 @@ class TrajectoryCollector:
         for key, value in success.items():
             success_rate[key] = np.mean(value)
 
+        add_tree_metadata(total_batch_list)
+        # The tree evaluator reports one outcome per terminal node in generation order.
+        outcomes = iter(success['success_rate'])
         for data in total_batch_list:
+            data['episode_success'] = bool(next(outcomes)) if data['is_terminal'] else None
+            data['turn_reward'] = float(data['rewards'])
             # add success_rate
             for key, value in success_rate.items():
                 data[key] = value
@@ -332,10 +341,17 @@ class TrajectoryCollector:
                     reward = data['rewards']
                     episode_length = np.float32(data['traj_step'] + 1)
                     current_tool_calling = data['current_tool_callings']
-                    node_uid = data['node_uid']
                     index = i
                     while index is not None:
-                        batch_list.append(total_batch_list[index])
+                        # Full-path training can give distinct credits to one shared node.
+                        # Keep path-specific record IDs and the original node ID for judging.
+                        node = total_batch_list[index]
+                        record = dict(node)
+                        record['id'] = f"{traj_uid}/{node['id']}"
+                        record['previous_step_ids'] = [f"{traj_uid}/{parent}" for parent in node['previous_step_ids']]
+                        record['trajectory_id'] = traj_uid
+                        record['episode_success'] = data['episode_success']
+                        batch_list.append(record)
                         extra_info = {}
                         extra_info['traj_uid'] = traj_uid
                         extra_info['episode_rewards'] = reward
@@ -360,6 +376,7 @@ class TrajectoryCollector:
             gen_batch: DataProto, 
             actor_rollout_wg, 
             envs: EnvironmentManagerBase,
+            on_turn_generated=None,
             ) -> DataProto:
         """
         Collects trajectories through parallel agent-environment agent_loop.
@@ -433,10 +450,10 @@ class TrajectoryCollector:
 
             batch = batch.union(batch_output)
             
-            text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
+            text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True, clean_up_tokenization_spaces=False)
             batch.non_tensor_batch['text_actions'] = text_actions
 
-            next_obs, rewards, dones, infos = envs.step(text_actions)
+            next_obs, rewards, dones, infos = envs.step(list(text_actions))
 
             if len(rewards.shape) == 2:
                 rewards = rewards.squeeze(1)
@@ -448,6 +465,9 @@ class TrajectoryCollector:
                 batch.non_tensor_batch['is_action_valid'] = np.array([info['is_action_valid'] for info in infos], dtype=bool)
             else:
                 batch.non_tensor_batch['is_action_valid'] = np.ones(batch_size, dtype=bool)
+
+            if on_turn_generated is not None:
+                on_turn_generated(batch, text_actions, active_masks)
 
             if 'tool_calling' in infos[0]:
                 tool_callings[active_masks] += np.array([info['tool_calling'] for info in infos], dtype=np.float32)[active_masks]
@@ -490,6 +510,7 @@ class TrajectoryCollector:
             gen_batch: DataProto, 
             actor_rollout_wg, 
             envs: EnvironmentManagerBase,
+            on_turn_generated=None,
             ) -> DataProto:
         """
         Conduct dynamic rollouts until a target batch size is met. 
@@ -527,6 +548,7 @@ class TrajectoryCollector:
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
                 envs=envs,
+                on_turn_generated=on_turn_generated,
             )
             batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings = filter_group_data(batch_list=batch_list, 
                                                                                                 episode_rewards=episode_rewards, 
@@ -558,6 +580,7 @@ class TrajectoryCollector:
             gen_batch: DataProto, 
             actor_rollout_wg, 
             envs: EnvironmentManagerBase,
+            on_turn_generated=None,
             ) -> DataProto:
         """
         Collects trajectories through parallel agent-environment agent_loop. some trajectories share the same prefix,
@@ -622,10 +645,10 @@ class TrajectoryCollector:
 
             batch = batch.union(batch_output)
             
-            text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
+            text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True, clean_up_tokenization_spaces=False)
             batch.non_tensor_batch['text_actions'] = text_actions
 
-            next_obs, rewards, dones, infos = node_management.envs.step(text_actions)
+            next_obs, rewards, dones, infos = node_management.envs.step(list(text_actions))
             node_management.obs = next_obs
 
             if len(rewards.shape) == 2:
@@ -638,6 +661,9 @@ class TrajectoryCollector:
                 batch.non_tensor_batch['is_action_valid'] = np.array([info['is_action_valid'] for info in infos], dtype=bool)
             else:
                 batch.non_tensor_batch['is_action_valid'] = np.ones(batch_size, dtype=bool)
+
+            if on_turn_generated is not None:
+                on_turn_generated(batch, text_actions, active_masks)
 
             if 'tool_calling' in infos[0]:
                 node_management.tool_callings[active_masks] += np.array([info['tool_calling'] for info in infos], dtype=np.float32)[active_masks]
@@ -727,6 +753,7 @@ class TrajectoryCollector:
             actor_rollout_wg, 
             envs: EnvironmentManagerBase,
             is_train: bool = True,
+            on_turn_generated=None,
             ) -> DataProto:
         """
         Select and run the appropriate rollout loop (dynamic or vanilla).
@@ -742,6 +769,8 @@ class TrajectoryCollector:
         """
         if is_train:
             gen_batch = gen_batch.repeat(repeat_times=self.config.env.rollout.n, interleave=True)
+        else:
+            on_turn_generated = None
         tree_structure_traj = self.config.algorithm.adv_estimator == AdvantageEstimator.IGRPO and is_train
             
         # Initial observations from the environment
@@ -751,6 +780,7 @@ class TrajectoryCollector:
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
                 envs=envs,
+                on_turn_generated=on_turn_generated,
             )
         elif self.config.algorithm.filter_groups.enable and is_train:
             # Dynamic Sampling (for DAPO and Dynamic GiGPO)
@@ -759,6 +789,7 @@ class TrajectoryCollector:
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
                 envs=envs,
+                on_turn_generated=on_turn_generated,
             )
         else:
             # Vanilla Sampling   
@@ -767,6 +798,7 @@ class TrajectoryCollector:
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
                 envs=envs,
+                on_turn_generated=on_turn_generated,
             )
         
         # for tree structure trajectory, we only return total_batch_list and total_success, where each item in batch_list is a node in the tree.

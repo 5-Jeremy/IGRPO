@@ -221,7 +221,8 @@ class vLLMRollout(BaseRollout):
         # supporting adding any sampling params from the config file
         for k in config.keys():
             if hasattr(SamplingParams(), str(k)):
-                kwargs[k] = config.get(k)
+                value = config.get(k)
+                kwargs[k] = OmegaConf.to_container(value, resolve=True) if isinstance(value, ListConfig) else value
 
         print(f"kwargs: {kwargs}")
         self.sampling_params = SamplingParams(**kwargs)
@@ -330,13 +331,15 @@ class vLLMRollout(BaseRollout):
             # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
 
             response = []
+            truncated_response_lengths = []
             rollout_log_probs = []
             for output in outputs:
-                for sample_id in range(len(output.outputs)):
-                    response_ids = output.outputs[sample_id].token_ids
+                for completion in output.outputs:
+                    response_ids = completion.token_ids
                     response.append(response_ids)
+                    truncated_response_lengths.append(len(response_ids) if completion.finish_reason == "length" else 0)
                     curr_log_prob = []
-                    for i, logprob in enumerate(output.outputs[sample_id].logprobs):
+                    for i, logprob in enumerate(completion.logprobs):
                         curr_log_prob.append(logprob[response_ids[i]].logprob)
                     rollout_log_probs.append(curr_log_prob)
 
@@ -375,6 +378,7 @@ class vLLMRollout(BaseRollout):
             {
                 "prompts": idx,
                 "responses": response,
+                "truncated_response_length": torch.tensor(truncated_response_lengths, device=idx.device, dtype=torch.long),
                 "input_ids": seq,  # here input_ids become the whole sentences
                 'rollout_log_probs': rollout_log_probs, # we will recompute old log prob with actor
                 "attention_mask": attention_mask,
