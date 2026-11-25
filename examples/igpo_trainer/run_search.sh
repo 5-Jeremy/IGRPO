@@ -15,6 +15,11 @@ if [[ $ENGINE == vllm ]]; then
     )
 fi
 
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+log_dir="${LOG_DIR:-$repo_root/logs/search/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+rollout_log_dir="${ROLLOUT_LOG_DIR:-$log_dir/rollouts}"
+checkpoint_dir="$(dirname -- "$rollout_log_dir")"
+
 train_data_size=128
 val_data_size=1024
 group_size=5
@@ -80,7 +85,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger=['console','wandb'] \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
-    trainer.default_local_dir="./checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}" \
+    "trainer.rollout_data_dir='$rollout_log_dir'" \
+    "trainer.default_local_dir='$checkpoint_dir'" \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=100 \
